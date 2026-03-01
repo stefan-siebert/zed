@@ -611,6 +611,22 @@ pub struct Hitbox {
     pub behavior: HitboxBehavior,
 }
 
+/// Info about an inspector element, extracted from frame data.
+/// All fields are owned/Send-safe so the data can be used outside the frame's lifetime.
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub struct InspectorElementInfo {
+    /// The element bounds in window coordinates.
+    pub bounds: Bounds<Pixels>,
+    /// The content mask (clip region) when the element was painted.
+    pub content_mask: ContentMask<Pixels>,
+    /// The global element ID path as a string (e.g. "view-1.panel.sidebar").
+    pub global_id: String,
+    /// The source location where this element was constructed (e.g. "src/button.rs:42:5").
+    pub source_location: String,
+    /// Instance ID disambiguating elements with the same path.
+    pub instance_id: usize,
+}
+
 impl Hitbox {
     /// Checks if the hitbox is currently hovered. Returns `false` during keyboard input modality
     /// so that keyboard navigation suppresses hover highlights. Except when handling
@@ -5116,17 +5132,17 @@ impl Window {
 
     /// Registers a hitbox that can be used for inspector picking mode, allowing users to select and
     /// inspect UI elements by clicking on them.
+    ///
+    /// Always stores the mapping so that external MCP tools can query element info
+    /// even when the built-in inspector picker is not active.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn insert_inspector_hitbox(
         &mut self,
         hitbox_id: HitboxId,
         inspector_id: Option<&crate::InspectorElementId>,
-        cx: &App,
+        _cx: &App,
     ) {
         self.invalidator.debug_assert_paint_or_prepaint();
-        if !self.is_inspector_picking(cx) {
-            return;
-        }
         if let Some(inspector_id) = inspector_id {
             self.next_frame
                 .inspector_hitboxes
@@ -5237,6 +5253,74 @@ impl Window {
             pressed_button: None,
         });
         let _ = self.dispatch_event(event, cx);
+    }
+
+    /// Returns inspector element information for all elements in the rendered frame
+    /// that have inspector hitboxes registered.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_elements(&self) -> Vec<InspectorElementInfo> {
+        self.rendered_frame
+            .hitboxes
+            .iter()
+            .filter_map(|hitbox| {
+                self.rendered_frame
+                    .inspector_hitboxes
+                    .get(&hitbox.id)
+                    .map(|inspector_id| InspectorElementInfo {
+                        bounds: hitbox.bounds,
+                        content_mask: hitbox.content_mask.clone(),
+                        global_id: format!("{}", inspector_id.path.global_id),
+                        source_location: format!("{}", inspector_id.path.source_location),
+                        instance_id: inspector_id.instance_id,
+                    })
+            })
+            .collect()
+    }
+
+    /// Dispatches a mouse down event at the given position.
+    /// Wraps dispatch_event to avoid exposing the private DispatchEventResult type.
+    pub fn dispatch_mouse_down(
+        &mut self,
+        position: Point<Pixels>,
+        button: MouseButton,
+        cx: &mut App,
+    ) {
+        let event = PlatformInput::MouseDown(crate::MouseDownEvent {
+            button,
+            position,
+            modifiers: self.modifiers,
+            click_count: 1,
+            first_mouse: false,
+        });
+        let _ = self.dispatch_event(event, cx);
+    }
+
+    /// Dispatches a mouse up event at the given position.
+    /// Wraps dispatch_event to avoid exposing the private DispatchEventResult type.
+    pub fn dispatch_mouse_up(
+        &mut self,
+        position: Point<Pixels>,
+        button: MouseButton,
+        cx: &mut App,
+    ) {
+        let event = PlatformInput::MouseUp(MouseUpEvent {
+            button,
+            position,
+            modifiers: self.modifiers,
+            click_count: 1,
+        });
+        let _ = self.dispatch_event(event, cx);
+    }
+
+    /// Dispatches a complete click (mouse down + mouse up) at the given position.
+    pub fn dispatch_click(
+        &mut self,
+        position: Point<Pixels>,
+        button: MouseButton,
+        cx: &mut App,
+    ) {
+        self.dispatch_mouse_down(position, button, cx);
+        self.dispatch_mouse_up(position, button, cx);
     }
 }
 
