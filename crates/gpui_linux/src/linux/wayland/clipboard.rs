@@ -179,7 +179,7 @@ impl Clipboard {
 
     pub fn send(&self, _mime_type: String, fd: OwnedFd) {
         if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
-            self.send_internal(fd, text.as_bytes().to_owned());
+            self.send_internal_bytes(fd, text.as_bytes().to_owned());
         }
     }
 
@@ -189,7 +189,7 @@ impl Clipboard {
             .as_ref()
             .and_then(|contents| contents.text())
         {
-            self.send_internal(fd, text.as_bytes().to_owned());
+            self.send_internal_bytes(fd, text.as_bytes().to_owned());
         }
     }
 
@@ -229,7 +229,9 @@ impl Clipboard {
         Some(item)
     }
 
-    fn send_internal(&self, fd: OwnedFd, bytes: Vec<u8>) {
+    /// Write raw bytes to a file descriptor asynchronously via the calloop event loop.
+    /// Used by both clipboard sends and native drag-and-drop data transfers.
+    pub(crate) fn send_internal_bytes(&self, fd: OwnedFd, bytes: Vec<u8>) {
         let mut written = 0;
         self.loop_handle
             .insert_source(

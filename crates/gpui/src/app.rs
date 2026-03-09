@@ -2547,6 +2547,10 @@ pub struct AnyDrag {
 
     /// The cursor style to use while dragging
     pub cursor_style: Option<CursorStyle>,
+
+    /// Whether the drag cursor is currently outside the window viewport.
+    /// When `true`, the application can hand off to native platform drag and drop.
+    pub is_external: bool,
 }
 
 /// Contains state associated with a tooltip. You'll only need this struct if you're implementing

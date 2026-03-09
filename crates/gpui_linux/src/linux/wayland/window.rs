@@ -1491,6 +1491,20 @@ impl PlatformWindow for WaylandWindow {
             bell.ring(surface);
         }
     }
+
+    fn start_native_drag(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        icon: Option<gpui::NativeDragIcon>,
+        mode: gpui::NativeDragMode,
+        callback: Box<dyn FnOnce(gpui::NativeDragResult) + Send>,
+    ) -> anyhow::Result<()> {
+        let state = self.borrow();
+        let surface = state.surface.clone();
+        let client = state.client.clone();
+        drop(state);
+        client.start_native_drag(&surface, paths, icon, mode, callback)
+    }
 }
 
 fn update_window(mut state: RefMut<WaylandWindowState>) {

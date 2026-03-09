@@ -345,6 +345,35 @@ impl Debug for DisplayId {
     }
 }
 
+/// The mode for a native drag operation (copy vs move).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeDragMode {
+    /// The dragged items should be copied to the drop target.
+    Copy,
+    /// The dragged items should be moved to the drop target.
+    Move,
+}
+
+/// The result of a completed native drag operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeDragResult {
+    /// The drag was accepted by the drop target.
+    Dropped,
+    /// The drag was cancelled (user released outside a valid target, or pressed Escape).
+    Cancel,
+}
+
+/// Pre-rendered drag icon image in ARGB8888 format (pre-multiplied alpha).
+#[derive(Clone)]
+pub struct NativeDragIcon {
+    /// Width of the icon in pixels.
+    pub width: u32,
+    /// Height of the icon in pixels.
+    pub height: u32,
+    /// Raw pixel data in ARGB8888 format (pre-multiplied), row-major, `width * height` entries.
+    pub pixels: Vec<u32>,
+}
+
 /// Which part of the window to resize
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {
@@ -685,6 +714,20 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         WindowControls::default()
     }
     fn set_client_inset(&self, _inset: Pixels) {}
+
+    /// Start a native platform drag operation with the given file paths.
+    /// The OS takes ownership of the drag visual and handles cross-window/cross-app drops.
+    /// The callback is invoked with the result when the drag completes or is cancelled.
+    fn start_native_drag(
+        &self,
+        _paths: Vec<PathBuf>,
+        _icon: Option<NativeDragIcon>,
+        _mode: NativeDragMode,
+        _callback: Box<dyn FnOnce(NativeDragResult) + Send>,
+    ) -> Result<()> {
+        anyhow::bail!("native drag not supported on this platform")
+    }
+
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);

@@ -8,8 +8,10 @@ use crate::{
     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
     LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
+    MouseMoveEvent, MouseUpEvent, NativeDragIcon, NativeDragMode, NativeDragResult, Path, Pixels,
+    PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton,
     PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
     Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
     ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
@@ -46,6 +48,7 @@ use std::{
     marker::PhantomData,
     mem,
     ops::{DerefMut, Range},
+    path::PathBuf,
     rc::Rc,
     sync::{
         Arc, Weak,
@@ -2012,6 +2015,28 @@ impl Window {
     /// Returns the size of the drawable area within the window.
     pub fn viewport_size(&self) -> Size<Pixels> {
         self.viewport_size
+    }
+
+    /// Returns the bounds of the drawable area within the window, starting at the origin.
+    pub fn viewport_bounds(&self) -> Bounds<Pixels> {
+        Bounds {
+            origin: Point::default(),
+            size: self.viewport_size,
+        }
+    }
+
+    /// Start a native platform drag operation with the given file paths.
+    /// The OS takes ownership of the drag visual and handles cross-window/cross-app drops.
+    /// The callback is invoked with the result when the drag completes or is cancelled.
+    pub fn start_native_drag(
+        &self,
+        paths: Vec<PathBuf>,
+        icon: Option<NativeDragIcon>,
+        mode: NativeDragMode,
+        callback: Box<dyn FnOnce(NativeDragResult) + Send>,
+    ) -> Result<()> {
+        self.platform_window
+            .start_native_drag(paths, icon, mode, callback)
     }
 
     /// Returns whether this window is focused by the operating system (receiving key events).
@@ -4178,6 +4203,7 @@ impl Window {
                             view: cx.new(|_| paths).into(),
                             cursor_offset: position,
                             cursor_style: None,
+                            is_external: false,
                         });
                     }
                     PlatformInput::MouseMove(MouseMoveEvent {
@@ -4269,6 +4295,19 @@ impl Window {
 
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {
+                // Update is_external flag based on whether cursor is inside the viewport.
+                let viewport = self.viewport_bounds();
+                if let Some(drag) = &mut cx.active_drag {
+                    let was_external = drag.is_external;
+                    drag.is_external = !viewport.contains(&self.mouse_position);
+
+                    // When re-entering the viewport, force a refresh to restore
+                    // the internal drag visual.
+                    if was_external && !drag.is_external {
+                        self.refresh();
+                    }
+                }
+
                 // If this was a mouse move event, redraw the window so that the
                 // active drag can follow the mouse cursor.
                 self.refresh();

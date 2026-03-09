@@ -66,6 +66,11 @@ pub struct DragMoveEvent<T> {
 
     /// The bounds of this element.
     pub bounds: Bounds<Pixels>,
+
+    /// Whether the drag cursor is currently outside the window viewport.
+    /// When `true`, the application should hand off to native platform drag and drop.
+    pub is_external: bool,
+
     drag: PhantomData<T>,
     dragged_item: Arc<dyn Any>,
 }
@@ -324,10 +329,12 @@ impl Interactivity {
                     && let Some(drag) = &cx.active_drag
                     && drag.value.as_ref().type_id() == TypeId::of::<T>()
                 {
+                    let is_external = drag.is_external;
                     (listener)(
                         &DragMoveEvent {
                             event: event.clone(),
                             bounds: hitbox.bounds,
+                            is_external,
                             drag: PhantomData,
                             dragged_item: Arc::clone(&drag.value),
                         },
@@ -2424,6 +2431,7 @@ impl Interactivity {
                                 value: drag_value,
                                 cursor_offset,
                                 cursor_style: drag_cursor_style,
+                                is_external: false,
                             });
                             pending_mouse_down.take();
                             window.refresh();
