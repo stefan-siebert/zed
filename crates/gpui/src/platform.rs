@@ -372,6 +372,8 @@ pub struct NativeDragIcon {
     pub height: u32,
     /// Raw pixel data in ARGB8888 format (pre-multiplied), row-major, `width * height` entries.
     pub pixels: Vec<u32>,
+    /// The offset of the cursor relative to the top-left of the drag icon.
+    pub offset: Point<DevicePixels>,
 }
 
 /// Which part of the window to resize

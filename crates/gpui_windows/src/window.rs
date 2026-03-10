@@ -957,6 +957,34 @@ impl PlatformWindow for WindowsWindow {
         // MB_OK: The sound specified as the Windows Default Beep sound.
         let _ = unsafe { MessageBeep(MB_OK) };
     }
+
+    fn start_native_drag(
+        &self,
+        paths: Vec<PathBuf>,
+        icon: Option<NativeDragIcon>,
+        mode: NativeDragMode,
+        callback: Box<dyn FnOnce(NativeDragResult) + Send>,
+    ) -> Result<()> {
+        // DoDragDrop runs a nested Win32 message loop which would re-enter
+        // GPUI callbacks while RefCells are still borrowed.  Defer it via
+        // PostMessageW so it executes in a clean message-processing context.
+        let request = Box::new(crate::native_drag::NativeDragRequest {
+            paths,
+            icon,
+            mode,
+            callback,
+        });
+        let lparam = LPARAM(Box::into_raw(request) as isize);
+        unsafe {
+            PostMessageW(
+                Some(self.0.hwnd),
+                crate::events::WM_GPUI_NATIVE_DRAG,
+                WPARAM(0),
+                lparam,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[implement(IDropTarget)]

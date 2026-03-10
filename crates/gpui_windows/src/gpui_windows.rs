@@ -11,6 +11,7 @@ mod dispatcher;
 mod display;
 mod events;
 mod keyboard;
+mod native_drag;
 mod platform;
 mod system_settings;
 mod util;
