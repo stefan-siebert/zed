@@ -28,6 +28,7 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
+pub(crate) const WM_GPUI_NATIVE_DRAG: u32 = WM_USER + 9;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -112,6 +113,27 @@ impl WindowsWindowInner {
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
+            WM_GPUI_NATIVE_DRAG => {
+                // lparam carries a boxed NativeDragRequest allocated by start_native_drag.
+                let request = unsafe {
+                    Box::from_raw(lparam.0 as *mut crate::native_drag::NativeDragRequest)
+                };
+                if let Err(err) = crate::native_drag::do_native_drag(
+                    request.paths,
+                    request.icon,
+                    request.mode,
+                    request.callback,
+                ) {
+                    log::warn!("native drag failed: {err}");
+                }
+                // DoDragDrop's nested message loop may have deactivated our window
+                // (WM_ACTIVATE → WA_INACTIVE). Restore focus so keyboard input works.
+                unsafe {
+                    let _ = SetForegroundWindow(handle);
+                    SetFocus(Some(handle)).ok();
+                }
+                Some(0)
+            }
             _ => None,
         };
         if let Some(n) = handled {
