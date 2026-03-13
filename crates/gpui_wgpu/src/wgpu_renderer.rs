@@ -1738,6 +1738,282 @@ impl WgpuRenderer {
         Ok(())
     }
 
+
+    /// Renders the scene to an offscreen texture and returns the pixel data as an RGBA image.
+    /// This does not present the frame to screen.
+    pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+        if width == 0 || height == 0 {
+            anyhow::bail!("Cannot render to image: window has zero size");
+        }
+
+        self.atlas.before_frame();
+        self.ensure_intermediate_textures();
+
+        let format = self.surface_config.format;
+
+        // Create offscreen texture to render into
+        let offscreen_texture =
+            self.resources()
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("render_to_image_texture"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+        let offscreen_view =
+            offscreen_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Set up globals (same as draw())
+        let globals = GlobalParams {
+            viewport_size: [width as f32, height as f32],
+            premultiplied_alpha: 0,
+            pad: 0,
+        };
+        let path_globals = GlobalParams {
+            premultiplied_alpha: 0,
+            ..globals
+        };
+        let gamma_params = GammaParams {
+            gamma_ratios: self.rendering_params.gamma_ratios,
+            grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
+            subpixel_enhanced_contrast: self.rendering_params.subpixel_enhanced_contrast,
+            _pad: [0.0; 2],
+        };
+
+        {
+            let resources = self.resources();
+            resources
+                .queue
+                .write_buffer(&resources.globals_buffer, 0, bytemuck::bytes_of(&globals));
+            resources.queue.write_buffer(
+                &resources.globals_buffer,
+                self.path_globals_offset,
+                bytemuck::bytes_of(&path_globals),
+            );
+            resources.queue.write_buffer(
+                &resources.globals_buffer,
+                self.gamma_offset,
+                bytemuck::bytes_of(&gamma_params),
+            );
+        }
+
+        // Render scene to offscreen texture (same loop structure as draw())
+        loop {
+            let mut instance_offset: u64 = 0;
+            let mut overflow = false;
+
+            let mut encoder =
+                self.resources()
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("render_to_image_encoder"),
+                    });
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("render_to_image_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &offscreen_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+
+                for batch in scene.batches() {
+                    let ok = match batch {
+                        PrimitiveBatch::Quads(range) => {
+                            self.draw_quads(&scene.quads[range], &mut instance_offset, &mut pass)
+                        }
+                        PrimitiveBatch::Shadows(range) => self.draw_shadows(
+                            &scene.shadows[range],
+                            &mut instance_offset,
+                            &mut pass,
+                        ),
+                        PrimitiveBatch::Paths(range) => {
+                            let paths = &scene.paths[range];
+                            if paths.is_empty() {
+                                continue;
+                            }
+                            drop(pass);
+
+                            let did_draw = self.draw_paths_to_intermediate(
+                                &mut encoder,
+                                paths,
+                                &mut instance_offset,
+                            );
+
+                            pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("render_to_image_pass_continued"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &offscreen_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                    depth_slice: None,
+                                })],
+                                depth_stencil_attachment: None,
+                                ..Default::default()
+                            });
+
+                            if did_draw {
+                                self.draw_paths_from_intermediate(
+                                    paths,
+                                    &mut instance_offset,
+                                    &mut pass,
+                                )
+                            } else {
+                                false
+                            }
+                        }
+                        PrimitiveBatch::Underlines(range) => self.draw_underlines(
+                            &scene.underlines[range],
+                            &mut instance_offset,
+                            &mut pass,
+                        ),
+                        PrimitiveBatch::MonochromeSprites { texture_id, range } => self
+                            .draw_monochrome_sprites(
+                                &scene.monochrome_sprites[range],
+                                texture_id,
+                                &mut instance_offset,
+                                &mut pass,
+                            ),
+                        PrimitiveBatch::SubpixelSprites { texture_id, range } => self
+                            .draw_subpixel_sprites(
+                                &scene.subpixel_sprites[range],
+                                texture_id,
+                                &mut instance_offset,
+                                &mut pass,
+                            ),
+                        PrimitiveBatch::PolychromeSprites { texture_id, range } => self
+                            .draw_polychrome_sprites(
+                                &scene.polychrome_sprites[range],
+                                texture_id,
+                                &mut instance_offset,
+                                &mut pass,
+                            ),
+                        PrimitiveBatch::Surfaces(_) => true,
+                    };
+                    if !ok {
+                        overflow = true;
+                        break;
+                    }
+                }
+            }
+
+            if overflow {
+                drop(encoder);
+                if self.instance_buffer_capacity >= self.max_buffer_size {
+                    anyhow::bail!("Instance buffer overflow during render_to_image");
+                }
+                self.grow_instance_buffer();
+                continue;
+            }
+
+            // Copy texture to a readable buffer
+            let bytes_per_pixel = 4u32;
+            let unpadded_bytes_per_row = width * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+            let buffer_size = (padded_bytes_per_row * height) as u64;
+
+            let output_buffer =
+                self.resources()
+                    .device
+                    .create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("render_to_image_buffer"),
+                        size: buffer_size,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    });
+
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &offscreen_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &output_buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            self.resources()
+                .queue
+                .submit(std::iter::once(encoder.finish()));
+
+            // Map the buffer and read pixels
+            let buffer_slice = output_buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                tx.send(result).ok();
+            });
+            self.resources()
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .map_err(|e| anyhow::anyhow!("GPU poll failed: {e}"))?;
+            rx.recv()
+                .map_err(|_| anyhow::anyhow!("GPU buffer map channel closed"))?
+                .map_err(|e| anyhow::anyhow!("GPU buffer map failed: {e}"))?;
+
+            let data = buffer_slice.get_mapped_range();
+
+            // Remove row padding and convert BGRA to RGBA if needed
+            let mut pixels = Vec::with_capacity((width * height * bytes_per_pixel) as usize);
+            for row in 0..height {
+                let start = (row * padded_bytes_per_row) as usize;
+                let end = start + (width * bytes_per_pixel) as usize;
+                pixels.extend_from_slice(&data[start..end]);
+            }
+            drop(data);
+            output_buffer.unmap();
+
+            // The surface format may be Bgra8Unorm — swap B and R channels
+            if format == wgpu::TextureFormat::Bgra8Unorm
+                || format == wgpu::TextureFormat::Bgra8UnormSrgb
+            {
+                for chunk in pixels.chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                }
+            }
+
+            return image::RgbaImage::from_raw(width, height, pixels)
+                .ok_or_else(|| anyhow::anyhow!("Failed to create image from pixel data"));
+        }
+    }
+
     pub fn destroy(&mut self) {
         // Release surface-bound GPU resources eagerly so the underlying native
         // window can be destroyed before the renderer itself is dropped.

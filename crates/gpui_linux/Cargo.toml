@@ -57,6 +57,7 @@ collections.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui_wgpu = { workspace = true, optional = true, features = ["font-kit"] }
+image.workspace = true
 http_client.workspace = true
 itertools.workspace = true
 libc.workspace = true
