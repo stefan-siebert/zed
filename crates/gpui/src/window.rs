@@ -5312,38 +5312,67 @@ impl Window {
     }
 
     /// Returns inspector element information for all elements in the rendered frame
-    /// that have inspector hitboxes registered. Text content is associated with elements
-    /// via spatial matching (text bounds contained within element bounds).
+    /// that have inspector hitboxes registered. Text content is associated with the
+    /// smallest containing inspector element (no duplication across parent/child).
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_elements(&self) -> Vec<InspectorElementInfo> {
         let painted_texts = &self.rendered_frame.inspector_painted_texts;
 
-        self.rendered_frame
+        // Collect all inspector hitboxes for matching
+        let inspector_hitboxes: Vec<(&Hitbox, &crate::InspectorElementId)> = self
+            .rendered_frame
             .hitboxes
             .iter()
             .filter_map(|hitbox| {
                 self.rendered_frame
                     .inspector_hitboxes
                     .get(&hitbox.id)
-                    .map(|inspector_id| {
-                        // Collect text content whose origin is within this element's bounds
-                        let text_content: Vec<String> = painted_texts
-                            .iter()
-                            .filter(|(text_bounds, _)| {
-                                hitbox.bounds.contains(&text_bounds.origin)
-                            })
-                            .map(|(_, text)| text.clone())
-                            .collect();
+                    .map(|id| (hitbox, id))
+            })
+            .collect();
 
-                        InspectorElementInfo {
-                            bounds: hitbox.bounds,
-                            content_mask: hitbox.content_mask.clone(),
-                            global_id: format!("{}", inspector_id.path.global_id),
-                            source_location: format!("{}", inspector_id.path.source_location),
-                            instance_id: inspector_id.instance_id,
-                            text_content,
-                        }
-                    })
+        // For each painted text, find the smallest containing inspector hitbox
+        let mut text_assignments: FxHashMap<HitboxId, Vec<String>> = FxHashMap::default();
+
+        for (text_bounds, text) in painted_texts {
+            let mut best_hitbox_id: Option<HitboxId> = None;
+            let mut best_area = f64::MAX;
+
+            for (hitbox, _) in &inspector_hitboxes {
+                if hitbox.bounds.contains(&text_bounds.origin) {
+                    let area = f64::from(f32::from(hitbox.bounds.size.width))
+                        * f64::from(f32::from(hitbox.bounds.size.height));
+                    if area < best_area {
+                        best_area = area;
+                        best_hitbox_id = Some(hitbox.id);
+                    }
+                }
+            }
+
+            if let Some(id) = best_hitbox_id {
+                text_assignments
+                    .entry(id)
+                    .or_default()
+                    .push(text.clone());
+            }
+        }
+
+        // Build the final list
+        inspector_hitboxes
+            .into_iter()
+            .map(|(hitbox, inspector_id)| {
+                let text_content = text_assignments
+                    .remove(&hitbox.id)
+                    .unwrap_or_default();
+
+                InspectorElementInfo {
+                    bounds: hitbox.bounds,
+                    content_mask: hitbox.content_mask.clone(),
+                    global_id: format!("{}", inspector_id.path.global_id),
+                    source_location: format!("{}", inspector_id.path.source_location),
+                    instance_id: inspector_id.instance_id,
+                    text_content,
+                }
             })
             .collect()
     }
