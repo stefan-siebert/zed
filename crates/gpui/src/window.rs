@@ -628,6 +628,8 @@ pub struct InspectorElementInfo {
     pub source_location: String,
     /// Instance ID disambiguating elements with the same path.
     pub instance_id: usize,
+    /// Text content painted within this element's bounds (collected via spatial matching).
+    pub text_content: Vec<String>,
 }
 
 impl Hitbox {
@@ -783,6 +785,8 @@ pub(crate) struct Frame {
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) inspector_painted_texts: Vec<(Bounds<Pixels>, String)>,
     pub(crate) tab_stops: TabStopMap,
 }
 
@@ -832,6 +836,8 @@ impl Frame {
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            inspector_painted_texts: Vec::new(),
             tab_stops: TabStopMap::default(),
         }
     }
@@ -860,6 +866,7 @@ impl Frame {
         {
             self.next_inspector_instance_ids.clear();
             self.inspector_hitboxes.clear();
+            self.inspector_painted_texts.clear();
         }
     }
 
@@ -5188,6 +5195,17 @@ impl Window {
         }
     }
 
+    /// Record text that was painted at the given bounds.
+    /// Used by the MCP inspector to associate text content with UI elements.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn record_painted_text(&mut self, bounds: Bounds<Pixels>, text: &str) {
+        if !text.is_empty() {
+            self.next_frame
+                .inspector_painted_texts
+                .push((bounds, text.to_string()));
+        }
+    }
+
     #[cfg(any(feature = "inspector", debug_assertions))]
     fn paint_inspector_hitbox(&mut self, cx: &App) {
         if let Some(inspector) = self.inspector.as_ref() {
@@ -5294,9 +5312,12 @@ impl Window {
     }
 
     /// Returns inspector element information for all elements in the rendered frame
-    /// that have inspector hitboxes registered.
+    /// that have inspector hitboxes registered. Text content is associated with elements
+    /// via spatial matching (text bounds contained within element bounds).
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_elements(&self) -> Vec<InspectorElementInfo> {
+        let painted_texts = &self.rendered_frame.inspector_painted_texts;
+
         self.rendered_frame
             .hitboxes
             .iter()
@@ -5304,12 +5325,24 @@ impl Window {
                 self.rendered_frame
                     .inspector_hitboxes
                     .get(&hitbox.id)
-                    .map(|inspector_id| InspectorElementInfo {
-                        bounds: hitbox.bounds,
-                        content_mask: hitbox.content_mask.clone(),
-                        global_id: format!("{}", inspector_id.path.global_id),
-                        source_location: format!("{}", inspector_id.path.source_location),
-                        instance_id: inspector_id.instance_id,
+                    .map(|inspector_id| {
+                        // Collect text content whose origin is within this element's bounds
+                        let text_content: Vec<String> = painted_texts
+                            .iter()
+                            .filter(|(text_bounds, _)| {
+                                hitbox.bounds.contains(&text_bounds.origin)
+                            })
+                            .map(|(_, text)| text.clone())
+                            .collect();
+
+                        InspectorElementInfo {
+                            bounds: hitbox.bounds,
+                            content_mask: hitbox.content_mask.clone(),
+                            global_id: format!("{}", inspector_id.path.global_id),
+                            source_location: format!("{}", inspector_id.path.source_location),
+                            instance_id: inspector_id.instance_id,
+                            text_content,
+                        }
                     })
             })
             .collect()

@@ -475,6 +475,10 @@ impl TextLayout {
             .with_context(|| format!("prepaint has not been performed on {text}"))
             .unwrap();
 
+        // Record text content for the MCP inspector
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        window.record_painted_text(bounds, text);
+
         let line_height = element_state.line_height;
         let mut line_origin = bounds.origin;
         let text_style = window.text_style();
