@@ -352,6 +352,111 @@ impl DirectXRenderer {
         self.present()
     }
 
+    /// Renders the scene to the back buffer and reads the pixels back as an RGBA image.
+    /// Does not present the frame to screen.
+    pub(crate) fn render_to_image(&mut self, scene: &Scene) -> Result<image::RgbaImage> {
+        let width = self.width;
+        let height = self.height;
+        if width == 0 || height == 0 {
+            anyhow::bail!("Cannot render to image: window has zero size");
+        }
+
+        // Render scene to the swap chain back buffer (same pipeline as draw)
+        self.pre_draw(&[0.0f32; 4])?;
+        self.upload_scene_buffers(scene)?;
+
+        for batch in scene.batches() {
+            match batch {
+                PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
+                PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
+                PrimitiveBatch::Paths(range) => {
+                    let paths = &scene.paths[range];
+                    self.draw_paths_to_intermediate(paths)?;
+                    self.draw_paths_from_intermediate(paths)
+                }
+                PrimitiveBatch::Underlines(range) => self.draw_underlines(range.start, range.len()),
+                PrimitiveBatch::MonochromeSprites { texture_id, range } => {
+                    self.draw_monochrome_sprites(texture_id, range.start, range.len())
+                }
+                PrimitiveBatch::SubpixelSprites { texture_id, range } => {
+                    self.draw_subpixel_sprites(texture_id, range.start, range.len())
+                }
+                PrimitiveBatch::PolychromeSprites { texture_id, range } => {
+                    self.draw_polychrome_sprites(texture_id, range.start, range.len())
+                }
+                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+            }
+            .context("render_to_image: failed to draw batch")?;
+        }
+
+        // Read back pixels from the render target instead of presenting
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let device = &devices.device;
+        let device_context = &devices.device_context;
+        let render_target = resources
+            .render_target
+            .as_ref()
+            .context("render target missing")?;
+
+        // Create a staging texture for CPU readback
+        let staging_texture = unsafe {
+            let mut output = None;
+            device.CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: RENDER_TARGET_FORMAT,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
+                },
+                None,
+                Some(&mut output),
+            )?;
+            output.unwrap()
+        };
+
+        // Copy rendered back buffer to staging texture
+        unsafe {
+            device_context.CopyResource(&staging_texture, render_target);
+        }
+
+        // Map staging texture and read BGRA pixels, converting to RGBA
+        let rgba_data = unsafe {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            device_context.Map(&staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+
+            let row_pitch = mapped.RowPitch as usize;
+            let expected_row_bytes = width as usize * 4;
+            let mut rgba = Vec::with_capacity((width * height) as usize * 4);
+
+            for y in 0..height as usize {
+                let row_start = mapped.pData.byte_add(y * row_pitch);
+                let row = slice::from_raw_parts(row_start as *const u8, expected_row_bytes);
+                for pixel in row.chunks_exact(4) {
+                    rgba.push(pixel[2]); // R (was B in BGRA)
+                    rgba.push(pixel[1]); // G
+                    rgba.push(pixel[0]); // B (was R in BGRA)
+                    rgba.push(pixel[3]); // A
+                }
+            }
+
+            device_context.Unmap(&staging_texture, 0);
+            rgba
+        };
+
+        image::RgbaImage::from_raw(width, height, rgba_data)
+            .context("Failed to create RgbaImage from pixel data")
+    }
+
     pub(crate) fn resize(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
         let width = new_size.width.0.max(1) as u32;
         let height = new_size.height.0.max(1) as u32;

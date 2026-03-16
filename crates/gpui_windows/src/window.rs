@@ -930,6 +930,10 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
+    fn render_to_image(&self, scene: &Scene) -> Result<image::RgbaImage> {
+        self.state.renderer.borrow_mut().render_to_image(scene)
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.state.renderer.borrow().sprite_atlas()
     }
