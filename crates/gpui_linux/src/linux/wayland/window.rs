@@ -600,6 +600,7 @@ impl WaylandWindowStatePtr {
                     }
                 }
             }
+            let mut skip_resize = false;
             {
                 let mut state = self.state.borrow_mut();
 
@@ -608,14 +609,17 @@ impl WaylandWindowStatePtr {
                     state.fullscreen = configure.fullscreen;
                     state.maximized = configure.maximized;
                     state.tiling = configure.tiling;
-                    // Limit interactive resizes to once per vblank
+                    // Limit interactive resizes to once per vblank.
+                    // We still must ack_configure + set_geometry below (Wayland protocol
+                    // requires every configure to be acknowledged), but we skip the
+                    // expensive resize/relayout until the next frame callback clears
+                    // the throttle.
                     if configure.resizing && state.resize_throttle {
-                        state.surface_state.ack_configure(serial);
-                        return;
+                        skip_resize = true;
                     } else if configure.resizing {
                         state.resize_throttle = true;
                     }
-                    if !configure.fullscreen && !configure.maximized {
+                    if !skip_resize && !configure.fullscreen && !configure.maximized {
                         configure.size = if got_unmaximized {
                             Some(state.window_bounds.size)
                         } else {
@@ -629,8 +633,10 @@ impl WaylandWindowStatePtr {
                         }
                     }
                     drop(state);
-                    if let Some(size) = configure.size {
-                        self.resize(size);
+                    if !skip_resize {
+                        if let Some(size) = configure.size {
+                            self.resize(size);
+                        }
                     }
                 }
             }
