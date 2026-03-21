@@ -999,6 +999,7 @@ pub struct Window {
     captured_hitbox: Option<HitboxId>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
+    pub(crate) hovers_suspended: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1496,6 +1497,7 @@ impl Window {
             captured_hitbox: None,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
+            hovers_suspended: false,
         })
     }
 
@@ -1540,6 +1542,11 @@ impl ContentMask<Pixels> {
 }
 
 impl Window {
+    /// Requests that hover changes be suspended or resumed.
+    pub fn suspend_hovers(&mut self, suspended: bool) {
+        self.hovers_suspended = suspended;
+    }
+
     fn mark_view_dirty(&mut self, view_id: EntityId) {
         // Mark ancestor views as dirty. If already in the `dirty_views` set, then all its ancestors
         // should already be dirty.
@@ -2443,7 +2450,11 @@ impl Window {
             tooltip_element = self.prepaint_tooltip(cx);
         }
 
-        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        let mut hit_test = self.next_frame.hit_test(self.mouse_position);
+        if self.hovers_suspended {
+            hit_test.hover_hitbox_count = 0;
+        }
+        self.mouse_hit_test = hit_test;
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
@@ -4261,7 +4272,10 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        let hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        let mut hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        if self.hovers_suspended {
+            hit_test.hover_hitbox_count = 0;
+        }
         if hit_test != self.mouse_hit_test {
             self.mouse_hit_test = hit_test;
             self.reset_cursor_style(cx);
