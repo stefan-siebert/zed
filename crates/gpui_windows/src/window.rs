@@ -90,6 +90,10 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
     pub(crate) platform_window_handle: HWND,
     pub(crate) parent_hwnd: Option<HWND>,
+    /// Set in WM_DESTROY before the window is removed from GPUI's map.
+    /// Detached tasks (e.g. WM_ACTIVATE handler) check this to avoid
+    /// calling update_window on a window that no longer exists.
+    pub(crate) closed: Cell<bool>,
 }
 
 impl WindowsWindowState {
@@ -254,6 +258,7 @@ impl WindowsWindowInner {
             platform_window_handle: context.platform_window_handle,
             system_settings: WindowsSystemSettings::new(),
             parent_hwnd: context.parent_hwnd,
+            closed: Cell::new(false),
         }))
     }
 

@@ -293,6 +293,11 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        // Mark as closed before the close callback removes the window from
+        // GPUI's map. Detached tasks spawned before destruction (e.g. from
+        // WM_ACTIVATE) will see this flag and skip update_window calls.
+        self.closed.set(true);
+
         let callback = { self.state.callbacks.close.take() };
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {
@@ -749,6 +754,9 @@ impl WindowsWindowInner {
         let this = self.clone();
         self.executor
             .spawn(async move {
+                if this.closed.get() {
+                    return;
+                }
                 if let Some(mut func) = this.state.callbacks.active_status_change.take() {
                     func(activated);
                     this.state.callbacks.active_status_change.set(Some(func));
