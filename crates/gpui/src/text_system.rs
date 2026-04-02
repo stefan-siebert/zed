@@ -79,8 +79,8 @@ impl TextSystem {
                 font("Helvetica"),
                 font("Segoe UI"),     // Windows
                 font("Ubuntu"),       // Gnome (Ubuntu)
-                font("Adwaita Sans"), // Gnome 47
-                font("Cantarell"),    // Gnome
+                font("Cantarell"),    // Gnome (static fonts, reliable bold/italic)
+                font("Adwaita Sans"), // Gnome 47 (variable font, bold broken in cosmic-text)
                 font("Noto Sans"),    // KDE
                 font("DejaVu Sans"),
                 font("Arial"), // macOS, Windows
@@ -153,8 +153,61 @@ impl TextSystem {
         if let Ok(font_id) = self.font_id(font) {
             return font_id;
         }
+
+        // Preserve the requested weight/style when falling through to
+        // fallback fonts.  Two passes: first try to find a fallback that
+        // genuinely supports the requested weight/style, then accept any.
+        let needs_bold = font.weight.0 >= 600.0;
+        let needs_italic = matches!(
+            font.style,
+            FontStyle::Italic | FontStyle::Oblique
+        );
+
+        // Pass 1: strict — only accept a fallback whose family has
+        // distinct font faces for the requested weight/style.
+        // We detect this by checking if the styled and unstyled requests
+        // resolve to different FontIds.
+        if needs_bold || needs_italic {
+            for fallback in &self.fallback_font_stack {
+                let styled = Font {
+                    family: fallback.family.clone(),
+                    features: fallback.features.clone(),
+                    fallbacks: fallback.fallbacks.clone(),
+                    weight: font.weight,
+                    style: font.style,
+                };
+                let Ok(styled_id) = self.font_id(&styled) else {
+                    continue;
+                };
+                // Resolve the same family at default weight/style
+                let base = Font {
+                    family: fallback.family.clone(),
+                    features: fallback.features.clone(),
+                    fallbacks: fallback.fallbacks.clone(),
+                    weight: FontWeight::default(),
+                    style: FontStyle::Normal,
+                };
+                let Ok(base_id) = self.font_id(&base) else {
+                    return styled_id;
+                };
+                // If they resolve to the same font, the family doesn't
+                // actually have the requested variant — skip it.
+                if styled_id != base_id {
+                    return styled_id;
+                }
+            }
+        }
+
+        // Pass 2: lenient — accept the best available match.
         for fallback in &self.fallback_font_stack {
-            if let Ok(font_id) = self.font_id(fallback) {
+            let adjusted = Font {
+                family: fallback.family.clone(),
+                features: fallback.features.clone(),
+                fallbacks: fallback.fallbacks.clone(),
+                weight: font.weight,
+                style: font.style,
+            };
+            if let Ok(font_id) = self.font_id(&adjusted) {
                 return font_id;
             }
         }

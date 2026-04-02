@@ -113,8 +113,46 @@ impl PlatformTextSystem for CosmicTextSystem {
         };
 
         let ix = find_best_match(font, candidates, &state)?;
+        let base_id = candidates[ix];
 
-        Ok(candidates[ix])
+        // Variable fonts are loaded at NORMAL weight by load_family.
+        // If the caller requests a different weight or style, try to
+        // reload the same face at the correct parameters.  For variable
+        // fonts this creates a distinct instance; for static fonts
+        // get_font returns the same data (harmless duplicate).
+        let target_weight = cosmic_text::Weight(font.weight.0 as u16);
+        // For variable fonts: if the face's weight doesn't match the
+        // requested weight, reload at the correct weight.  Only check
+        // weight — get_font can't change style (italic needs a separate face).
+        let (db_id, face_weight, features, is_emoji) = {
+            let loaded = state.loaded_font(base_id);
+            let db_id = loaded.font.id();
+            let face_info = state
+                .font_system
+                .db()
+                .face(db_id)
+                .context("font face not found in database")?;
+            (
+                db_id,
+                face_info.weight,
+                loaded.features.clone(),
+                loaded.is_known_emoji_font,
+            )
+        };
+
+        if face_weight != target_weight {
+            if let Some(reloaded) = state.font_system.get_font(db_id, target_weight) {
+                let new_id = FontId(state.loaded_fonts.len());
+                state.loaded_fonts.push(LoadedFont {
+                    font: reloaded,
+                    features,
+                    is_known_emoji_font: is_emoji,
+                });
+                return Ok(new_id);
+            }
+        }
+
+        Ok(base_id)
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
