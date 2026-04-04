@@ -1,8 +1,8 @@
 use crate::{
-    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
+    AnyElement, AnyImageCache, AnimationLoop, App, Asset, AssetLogger, Bounds, DefiniteLength,
+    Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId,
+    InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
+    RenderImage, Resource, SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
 };
 use anyhow::Result;
 
@@ -253,6 +253,10 @@ struct ImgState {
     frame_index: usize,
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
+    /// Number of completed animation loops so far.
+    loops_completed: u16,
+    /// Whether the animation has finished (loop count reached).
+    animation_finished: bool,
 }
 
 /// The image layout state between frames
@@ -291,6 +295,8 @@ impl Element for Img {
                     frame_index: 0,
                     last_frame_time: None,
                     started_loading: None,
+                    loops_completed: 0,
+                    animation_finished: false,
                 })
             });
 
@@ -315,7 +321,7 @@ impl Element for Img {
                             if let Some(state) = &mut state {
                                 let frame_count = data.frame_count();
                                 if frame_count > 1 {
-                                    if window.is_window_active() {
+                                    if window.is_window_active() && !state.animation_finished {
                                         let current_time = Instant::now();
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
@@ -323,10 +329,38 @@ impl Element for Img {
                                                 Duration::from(data.delay(state.frame_index));
 
                                             if elapsed >= frame_duration {
-                                                state.frame_index =
-                                                    (state.frame_index + 1) % frame_count;
-                                                state.last_frame_time =
-                                                    Some(current_time - (elapsed - frame_duration));
+                                                let next_index = state.frame_index + 1;
+                                                if next_index >= frame_count {
+                                                    // Wrapped around — count a completed loop
+                                                    state.loops_completed += 1;
+                                                    if let AnimationLoop::Times(max) =
+                                                        data.loop_count()
+                                                    {
+                                                        if state.loops_completed >= max {
+                                                            // Stay on last frame
+                                                            state.animation_finished = true;
+                                                            state.last_frame_time = None;
+                                                        } else {
+                                                            state.frame_index = 0;
+                                                            state.last_frame_time = Some(
+                                                                current_time
+                                                                    - (elapsed - frame_duration),
+                                                            );
+                                                        }
+                                                    } else {
+                                                        state.frame_index = 0;
+                                                        state.last_frame_time = Some(
+                                                            current_time
+                                                                - (elapsed - frame_duration),
+                                                        );
+                                                    }
+                                                } else {
+                                                    state.frame_index = next_index;
+                                                    state.last_frame_time = Some(
+                                                        current_time
+                                                            - (elapsed - frame_duration),
+                                                    );
+                                                }
                                             }
                                         } else {
                                             state.last_frame_time = Some(current_time);
@@ -676,7 +710,10 @@ impl Asset for ImageAssetLoader {
                                 frames.push(frame);
                             }
 
-                            frames
+                            let loop_count = parse_webp_loop_count(&bytes);
+                            return Ok(Arc::new(
+                                RenderImage::new(frames).with_loop_count(loop_count),
+                            ));
                         } else {
                             let mut data = DynamicImage::from_decoder(decoder)?.into_rgba8();
 
@@ -709,6 +746,29 @@ impl Asset for ImageAssetLoader {
             }
         }
     }
+}
+
+/// Parse the loop count from raw WebP bytes by scanning for the ANIM chunk.
+/// WebP ANIM chunk layout: 'ANIM' (4 bytes) + chunk_size (4 bytes LE) +
+/// background_color (4 bytes) + loop_count (2 bytes LE).
+/// A loop_count of 0 means infinite; any other value is the number of times to play.
+fn parse_webp_loop_count(bytes: &[u8]) -> AnimationLoop {
+    // Scan for "ANIM" chunk marker
+    for i in 0..bytes.len().saturating_sub(15) {
+        if &bytes[i..i + 4] == b"ANIM" {
+            // loop_count is at offset +12 from chunk start:
+            //   4 (tag) + 4 (chunk size) + 4 (bgcolor) = 12
+            let lo = bytes[i + 12] as u16;
+            let hi = bytes[i + 13] as u16;
+            let count = lo | (hi << 8);
+            return if count == 0 {
+                AnimationLoop::Forever
+            } else {
+                AnimationLoop::Times(count)
+            };
+        }
+    }
+    AnimationLoop::Forever
 }
 
 /// An error that can occur when interacting with the image cache.

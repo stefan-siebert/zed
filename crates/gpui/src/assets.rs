@@ -39,6 +39,15 @@ pub struct RenderImageParams {
     pub frame_index: usize,
 }
 
+/// How many times an animated image should loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimationLoop {
+    /// Loop forever.
+    Forever,
+    /// Play the animation a fixed number of times, then stop on the last frame.
+    Times(u16),
+}
+
 /// A cached and processed image, in BGRA format
 pub struct RenderImage {
     /// The ID associated with this image
@@ -46,6 +55,8 @@ pub struct RenderImage {
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
     data: SmallVec<[Frame; 1]>,
+    /// How many times the animation should loop (only relevant for multi-frame images).
+    loop_count: AnimationLoop,
 }
 
 impl PartialEq for RenderImage {
@@ -65,7 +76,14 @@ impl RenderImage {
             id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
             scale_factor: 1.0,
             data: data.into(),
+            loop_count: AnimationLoop::Forever,
         }
+    }
+
+    /// Set the loop count for this animated image.
+    pub fn with_loop_count(mut self, loop_count: AnimationLoop) -> Self {
+        self.loop_count = loop_count;
+        self
     }
 
     /// Convert this image into a byte slice.
@@ -95,6 +113,11 @@ impl RenderImage {
     /// Get the number of frames for this image.
     pub fn frame_count(&self) -> usize {
         self.data.len()
+    }
+
+    /// Get the loop count for this animated image.
+    pub fn loop_count(&self) -> AnimationLoop {
+        self.loop_count
     }
 }
 
