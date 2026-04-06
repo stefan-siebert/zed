@@ -395,14 +395,36 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   float4 final_color = color * float4(1.0, 1.0, 1.0, saturate(antialias_threshold - outer_sdf));
 
-  // Effect: outer glow (type 1)
-  if (quad.effect_type == 1) {
-    float4 glow_color = float4(quad.effect_params[0], quad.effect_params[1],
-                               quad.effect_params[2], quad.effect_params[3]);
-    float max_dist = min(half_size.x, half_size.y);
-    float t = saturate(outer_sdf / max_dist);
-    float glow_alpha = glow_color.a * (1.0 - t * t);
-    final_color = final_color + float4(glow_color.rgb * glow_alpha, glow_alpha) * (1.0 - final_color.a);
+  // Effect 2: Noise
+  if (quad.effect_type == 2) {
+    float2 uv = input.position.xy * quad.effect_params[1];
+    float n = fract(sin(dot(uv, float2(12.9898, 78.233)) + quad.effect_params[2]) * 43758.5453);
+    float shift = (n - 0.5) * quad.effect_params[0];
+    final_color = float4(
+      saturate(final_color.r + shift * final_color.a),
+      saturate(final_color.g + shift * final_color.a),
+      saturate(final_color.b + shift * final_color.a),
+      final_color.a);
+  }
+
+  // Effect 3: Vignette
+  if (quad.effect_type == 3) {
+    float2 center = input.position.xy - quad.bounds.origin - half_size;
+    float2 nd = float2(center.x / half_size.x, center.y / half_size.y) * quad.effect_params[2];
+    float d = length(nd);
+    float radius = quad.effect_params[1];
+    float v = saturate(1.0 - smoothstep(radius, 1.0, d) * quad.effect_params[0]);
+    final_color = float4(final_color.rgb * v, final_color.a);
+  }
+
+  // Effect 4: Shimmer
+  if (quad.effect_type == 4) {
+    float uv_x = (input.position.xy.x - quad.bounds.origin.x) / quad.bounds.size.x;
+    float sweep = fract(quad.effect_params[3] * quad.effect_params[0]);
+    float width = quad.effect_params[1];
+    float dist = abs(uv_x - sweep);
+    float shimmer = saturate(1.0 - dist / width) * quad.effect_params[2];
+    final_color = float4(final_color.rgb + shimmer * final_color.a, final_color.a);
   }
 
   return final_color;

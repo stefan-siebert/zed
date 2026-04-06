@@ -573,24 +573,41 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     let quad = b_quads[input.quad_id];
 
-    // Effect: outer glow (type 1) — early exit before normal quad logic.
-    // effect_params = glow color [r, g, b, intensity] in linear sRGB.
-    // Renders a soft elliptical falloff from center to edges.
+    // ── Quad effects (early exit for overlay-type effects) ──────────
+
+    // Effect 1: Outer glow — soft elliptical falloff from center.
+    // params: [r, g, b, intensity]
     if (quad.effect_type == 1u) {
         let half = quad.bounds.size / 2.0;
         let center = input.position.xy - quad.bounds.origin - half;
-        // Elliptical distance for aspect-ratio-correct falloff
         let nd = vec2<f32>(center.x / half.x, center.y / half.y);
         let d = length(nd);
         let f = saturate(1.0 - d);
-        let glow_a = quad.effect_params[3];
-        let alpha = glow_a * f;
+        let a = quad.effect_params[3] * f;
         return vec4<f32>(
             quad.effect_params[0] * f,
             quad.effect_params[1] * f,
             quad.effect_params[2] * f,
-            alpha,
+            a,
         );
+    }
+
+    // Effect 2: Noise/grain overlay — adds subtle monochrome noise.
+    // params: [intensity, scale, seed, 0]
+    // Renders as a semi-transparent noise pattern on top of the quad.
+    if (quad.effect_type == 2u) {
+        let uv = input.position.xy * quad.effect_params[1];
+        let n = fract(sin(dot(uv, vec2<f32>(12.9898, 78.233)) + quad.effect_params[2]) * 43758.5453);
+        let intensity = quad.effect_params[0];
+        // Noise shifts luminance: 0.5 is neutral, <0.5 darkens, >0.5 brightens
+        let shift = (n - 0.5) * intensity;
+        // Continue to normal quad rendering, then apply noise below
+    }
+
+    // Effect 3: Vignette — darken edges of the quad.
+    // params: [strength, radius, roundness, 0]
+    if (quad.effect_type == 3u) {
+        // Continue to normal quad rendering, then apply vignette below
     }
 
     let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
@@ -912,7 +929,49 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
                     saturate(antialias_threshold - inner_sdf));
     }
 
-    return blend_color(color, saturate(antialias_threshold - outer_sdf));
+    var final_color = blend_color(color, saturate(antialias_threshold - outer_sdf));
+
+    // ── Post-processing effects applied after normal quad rendering ──
+
+    // Effect 2: Noise — apply luminance shift
+    if (quad.effect_type == 2u) {
+        let uv = input.position.xy * quad.effect_params[1];
+        let n = fract(sin(dot(uv, vec2<f32>(12.9898, 78.233)) + quad.effect_params[2]) * 43758.5453);
+        let shift = (n - 0.5) * quad.effect_params[0];
+        final_color = vec4<f32>(
+            saturate(final_color.r + shift * final_color.a),
+            saturate(final_color.g + shift * final_color.a),
+            saturate(final_color.b + shift * final_color.a),
+            final_color.a,
+        );
+    }
+
+    // Effect 3: Vignette — darken edges
+    if (quad.effect_type == 3u) {
+        let half = quad.bounds.size / 2.0;
+        let center = input.position.xy - quad.bounds.origin - half;
+        let nd = vec2<f32>(center.x / half.x, center.y / half.y);
+        let d = length(nd * quad.effect_params[2]);
+        let radius = quad.effect_params[1];
+        let v = saturate(1.0 - smoothstep(radius, 1.0, d) * quad.effect_params[0]);
+        final_color = vec4<f32>(final_color.rgb * v, final_color.a);
+    }
+
+    // Effect 4: Shimmer — animated horizontal gradient sweep
+    // params: [speed, width, intensity, time]
+    if (quad.effect_type == 4u) {
+        let uv_x = (input.position.xy.x - quad.bounds.origin.x) / quad.bounds.size.x;
+        let sweep = fract(quad.effect_params[3] * quad.effect_params[0]);
+        let width = quad.effect_params[1];
+        let dist = abs(uv_x - sweep);
+        let shimmer = saturate(1.0 - dist / width) * quad.effect_params[2];
+        final_color = vec4<f32>(
+            final_color.rgb + shimmer * final_color.a,
+            final_color.a,
+        );
+    }
+
+    return final_color;
 }
 
 // Returns the dash velocity of a corner given the dash velocity of the two
