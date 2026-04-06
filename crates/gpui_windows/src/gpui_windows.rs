@@ -5,6 +5,7 @@ mod destination_list;
 mod direct_manipulation;
 mod direct_write;
 mod directx_atlas;
+mod directx_custom_shader;
 mod directx_devices;
 mod directx_renderer;
 mod dispatcher;

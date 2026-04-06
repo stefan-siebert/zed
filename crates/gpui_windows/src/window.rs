@@ -936,12 +936,11 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn register_custom_shader(&self, wgsl_fragment: &str, label: &str) -> Option<CustomShaderId> {
-        Some(
-            self.state
-                .renderer
-                .borrow_mut()
-                .register_custom_shader(wgsl_fragment, label),
-        )
+        self.state
+            .renderer
+            .borrow_mut()
+            .register_custom_shader(wgsl_fragment, label)
+            .log_err()
     }
 
     fn render_to_image(&self, scene: &Scene) -> Result<image::RgbaImage> {

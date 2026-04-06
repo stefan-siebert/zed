@@ -19,6 +19,9 @@ use windows::{
     core::Interface,
 };
 
+use crate::directx_custom_shader::{
+    create_raw_instance_buffer_srv, CustomShaderResources,
+};
 use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
 use crate::*;
 use gpui::*;
@@ -41,6 +44,7 @@ pub(crate) struct DirectXRenderer {
     resources: Option<DirectXResources>,
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
+    custom_shaders: CustomShaderResources,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
 
@@ -168,6 +172,7 @@ impl DirectXRenderer {
             resources: Some(resources),
             globals,
             pipelines,
+            custom_shaders: CustomShaderResources::new(),
             direct_composition,
             font_info: Self::get_font_info(),
             width: 1,
@@ -293,6 +298,7 @@ impl DirectXRenderer {
         self.resources = Some(resources);
         self.globals = globals;
         self.pipelines = pipelines;
+        self.custom_shaders.handle_device_lost();
         self.direct_composition = direct_composition;
         self.skip_draws = true;
         Ok(())
@@ -335,10 +341,13 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                PrimitiveBatch::CustomShaders { shader_id, range } => {
+                    self.draw_custom_shaders(shader_id, range.start, range.len())
+                }
             }
             .context(format!(
                 "scene too large:\
-                {} paths, {} shadows, {} quads, {} underlines, {} mono, {} subpixel, {} poly, {} surfaces",
+                {} paths, {} shadows, {} quads, {} underlines, {} mono, {} subpixel, {} poly, {} surfaces, {} custom",
                 scene.paths.len(),
                 scene.shadows.len(),
                 scene.quads.len(),
@@ -347,6 +356,7 @@ impl DirectXRenderer {
                 scene.subpixel_sprites.len(),
                 scene.polychrome_sprites.len(),
                 scene.surfaces.len(),
+                scene.custom_shaders.len(),
             ))?;
         }
         self.present()
@@ -385,6 +395,9 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                PrimitiveBatch::CustomShaders { shader_id, range } => {
+                    self.draw_custom_shaders(shader_id, range.start, range.len())
+                }
             }
             .context("render_to_image: failed to draw batch")?;
         }
@@ -549,6 +562,14 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.polychrome_sprites,
+            )?;
+        }
+
+        if !scene.custom_shaders.is_empty() {
+            self.custom_shaders.upload_instances(
+                &devices.device,
+                &devices.device_context,
+                &scene.custom_shaders,
             )?;
         }
 
@@ -804,6 +825,63 @@ impl DirectXRenderer {
             return Ok(());
         }
         Ok(())
+    }
+
+    fn draw_custom_shaders(
+        &mut self,
+        shader_id: CustomShaderId,
+        start: usize,
+        len: usize,
+    ) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let Some(pipeline) = self.custom_shaders.pipeline(shader_id) else {
+            // Unknown shader id (e.g., never registered or registered on a previous device).
+            // Match the wgpu backend's behavior: skip silently.
+            return Ok(());
+        };
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let buffer = self
+            .custom_shaders
+            .instance_buffer()
+            .context("custom shader instance buffer missing")?;
+        let view = create_raw_instance_buffer_srv(&devices.device, buffer, start, len)?;
+
+        let device_context = &devices.device_context;
+        unsafe {
+            device_context.VSSetShaderResources(1, Some(slice::from_ref(&view)));
+            device_context.PSSetShaderResources(1, Some(slice::from_ref(&view)));
+            device_context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
+            device_context.VSSetShader(&pipeline.vertex, None);
+            device_context.PSSetShader(&pipeline.fragment, None);
+            device_context.VSSetConstantBuffers(
+                0,
+                Some(slice::from_ref(&self.globals.global_params_buffer)),
+            );
+            device_context.PSSetConstantBuffers(
+                0,
+                Some(slice::from_ref(&self.globals.global_params_buffer)),
+            );
+            device_context.OMSetBlendState(&pipeline.blend_state, None, 0xFFFFFFFF);
+            device_context.DrawInstanced(4, len as u32, 0, 0);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn register_custom_shader(
+        &mut self,
+        wgsl_fragment: &str,
+        label: &str,
+    ) -> Result<CustomShaderId> {
+        let device = &self
+            .devices
+            .as_ref()
+            .context("devices missing while registering custom shader")?
+            .device;
+        self.custom_shaders.register(device, wgsl_fragment, label)
     }
 
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
