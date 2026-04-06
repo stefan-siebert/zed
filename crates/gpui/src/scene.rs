@@ -36,6 +36,7 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    pub custom_shaders: Vec<CustomShaderInstance>,
 }
 
 #[expect(missing_docs)]
@@ -119,6 +120,10 @@ impl Scene {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
             }
+            Primitive::CustomShader(cs) => {
+                cs.order = order;
+                self.custom_shaders.push(cs.clone());
+            }
         }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
@@ -146,6 +151,8 @@ impl Scene {
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
+        self.custom_shaders
+            .sort_by_key(|cs| (cs.order, cs.shader_id.0));
     }
 
     #[cfg_attr(
@@ -173,6 +180,8 @@ impl Scene {
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            custom_shaders_start: 0,
+            custom_shaders_iter: self.custom_shaders.iter().peekable(),
         }
     }
 }
@@ -195,6 +204,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    CustomShader,
 }
 
 pub(crate) enum PaintOperation {
@@ -214,6 +224,7 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+    CustomShader(CustomShaderInstance),
 }
 
 #[expect(missing_docs)]
@@ -228,6 +239,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::CustomShader(cs) => &cs.bounds,
         }
     }
 
@@ -241,6 +253,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::CustomShader(cs) => &cs.content_mask,
         }
     }
 }
@@ -269,6 +282,8 @@ struct BatchIterator<'a> {
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    custom_shaders_start: usize,
+    custom_shaders_iter: Peekable<slice::Iter<'a, CustomShaderInstance>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -301,6 +316,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.surfaces_iter.peek().map(|s| s.order),
                 PrimitiveKind::Surface,
+            ),
+            (
+                self.custom_shaders_iter.peek().map(|cs| cs.order),
+                PrimitiveKind::CustomShader,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -447,6 +466,27 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
             }
+            PrimitiveKind::CustomShader => {
+                let shader_id = self.custom_shaders_iter.peek().unwrap().shader_id;
+                let start = self.custom_shaders_start;
+                let mut end = start + 1;
+                self.custom_shaders_iter.next();
+                while self
+                    .custom_shaders_iter
+                    .next_if(|cs| {
+                        (cs.order, batch_kind) < max_order_and_kind
+                            && cs.shader_id == shader_id
+                    })
+                    .is_some()
+                {
+                    end += 1;
+                }
+                self.custom_shaders_start = end;
+                Some(PrimitiveBatch::CustomShaders {
+                    shader_id,
+                    range: start..end,
+                })
+            }
         }
     }
 }
@@ -479,6 +519,10 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
+    CustomShaders {
+        shader_id: CustomShaderId,
+        range: Range<usize>,
+    },
 }
 
 #[derive(Default, Debug, Clone)]
@@ -729,6 +773,33 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+/// Opaque handle to a registered custom shader pipeline.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CustomShaderId(pub u32);
+
+/// Instance data for a custom shader primitive.
+/// The shader receives bounds, content_mask, and 16 user-defined float params.
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub struct CustomShaderInstance {
+    /// Draw order (assigned by scene).
+    pub order: DrawOrder,
+    /// Which registered shader to use.
+    pub shader_id: CustomShaderId,
+    /// Quad bounds in device pixels.
+    pub bounds: Bounds<ScaledPixels>,
+    /// Clip rectangle.
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// 16 user-defined float parameters passed to the fragment shader.
+    pub params: [f32; 16],
+}
+
+impl From<CustomShaderInstance> for Primitive {
+    fn from(instance: CustomShaderInstance) -> Self {
+        Primitive::CustomShader(instance)
     }
 }
 

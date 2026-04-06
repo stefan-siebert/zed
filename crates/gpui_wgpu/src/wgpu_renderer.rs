@@ -1,10 +1,11 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
-    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
-    Underline, get_gamma_correction_ratios,
+    AtlasTextureId, Background, Bounds, CustomShaderInstance, CustomShaderId, DevicePixels,
+    GpuSpecs, MonochromeSprite, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels,
+    Scene, Shadow, Size, SubpixelSprite, Underline, get_gamma_correction_ratios,
 };
+use std::collections::HashMap;
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -146,6 +147,8 @@ pub struct WgpuRenderer {
     failed_frame_count: u32,
     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     surface_configured: bool,
+    custom_shader_pipelines: HashMap<CustomShaderId, wgpu::RenderPipeline>,
+    next_custom_shader_id: u32,
 }
 
 impl WgpuRenderer {
@@ -480,6 +483,8 @@ impl WgpuRenderer {
             failed_frame_count: 0,
             device_lost: context.device_lost_flag(),
             surface_configured: true,
+            custom_shader_pipelines: HashMap::new(),
+            next_custom_shader_id: 0,
         })
     }
 
@@ -1285,6 +1290,14 @@ impl WgpuRenderer {
                             // Not implemented for Linux/wgpu
                             true
                         }
+                        PrimitiveBatch::CustomShaders { shader_id, range } => {
+                            self.draw_custom_shaders(
+                                &scene.custom_shaders[range],
+                                shader_id,
+                                &mut instance_offset,
+                                &mut pass,
+                            )
+                        }
                     };
                     if !ok {
                         overflow = true;
@@ -1499,6 +1512,168 @@ impl WgpuRenderer {
         pass.set_bind_group(1, &bind_group, &[]);
         pass.draw(0..4, 0..instance_count);
         true
+    }
+
+    /// Register a custom fragment shader. Returns a handle for use with
+    /// `CustomShaderInstance`. The shader receives a `CustomShaderInstance`
+    /// struct and must define `fn custom_fs(position: vec2<f32>, bounds: Bounds,
+    /// content_mask: Bounds, params: array<f32, 16>) -> vec4<f32>`.
+    pub fn register_custom_shader(&mut self, wgsl_fragment: &str, label: &str) -> CustomShaderId {
+        let id = CustomShaderId(self.next_custom_shader_id);
+        self.next_custom_shader_id += 1;
+
+        let full_source = Self::build_custom_shader_source(wgsl_fragment);
+        let resources = self.resources.as_ref().expect("resources not initialized");
+        let module = resources
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(full_source.into()),
+            });
+
+        let pipeline_layout =
+            resources
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(&format!("custom_shader_{label}_layout")),
+                    bind_group_layouts: &[
+                        Some(&resources.bind_group_layouts.globals),
+                        Some(&resources.bind_group_layouts.instances),
+                    ],
+                    immediate_size: 0,
+                });
+
+        let blend_mode = wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING;
+        let pipeline =
+            resources
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_custom"),
+                        buffers: &[],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_custom"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: self.surface_config.format,
+                            blend: Some(blend_mode),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState {
+                        count: 1,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                });
+
+        self.custom_shader_pipelines.insert(id, pipeline);
+        id
+    }
+
+    fn build_custom_shader_source(user_fragment: &str) -> String {
+        format!(
+            r#"
+struct GlobalParams {{
+    viewport_size: vec2<f32>,
+    premultiplied_alpha: u32,
+    pad: u32,
+}}
+@group(0) @binding(0) var<uniform> globals: GlobalParams;
+
+struct Bounds {{
+    origin: vec2<f32>,
+    size: vec2<f32>,
+}}
+
+struct CustomShaderInstance {{
+    order: u32,
+    shader_id: u32,
+    bounds: Bounds,
+    content_mask: Bounds,
+    params: array<f32, 16>,
+}}
+@group(1) @binding(0) var<storage, read> b_instances: array<CustomShaderInstance>;
+
+fn to_device_position(unit_vertex: vec2<f32>, bounds: Bounds) -> vec4<f32> {{
+    let pos = unit_vertex * bounds.size + bounds.origin;
+    let ndc = pos / globals.viewport_size * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    return vec4<f32>(ndc, 0.0, 1.0);
+}}
+
+fn distance_from_clip_rect(unit_vertex: vec2<f32>, bounds: Bounds, clip: Bounds) -> vec4<f32> {{
+    let pos = unit_vertex * bounds.size + bounds.origin;
+    return vec4<f32>(
+        pos.x - clip.origin.x,
+        clip.origin.x + clip.size.x - pos.x,
+        pos.y - clip.origin.y,
+        clip.origin.y + clip.size.y - pos.y,
+    );
+}}
+
+struct CustomVarying {{
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) instance_id: u32,
+    @location(1) clip_distances: vec4<f32>,
+}}
+
+@vertex
+fn vs_custom(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> CustomVarying {{
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let inst = b_instances[instance_id];
+    var out: CustomVarying;
+    out.position = to_device_position(unit_vertex, inst.bounds);
+    out.instance_id = instance_id;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, inst.bounds, inst.content_mask);
+    return out;
+}}
+
+// --- User-provided fragment shader ---
+{user_fragment}
+
+@fragment
+fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
+    if (any(input.clip_distances < vec4<f32>(0.0))) {{
+        return vec4<f32>(0.0);
+    }}
+    let inst = b_instances[input.instance_id];
+    return custom_effect(input.position.xy, inst.bounds, inst.content_mask, inst.params);
+}}
+"#,
+            user_fragment = user_fragment,
+        )
+    }
+
+    fn draw_custom_shaders(
+        &self,
+        instances: &[CustomShaderInstance],
+        shader_id: CustomShaderId,
+        instance_offset: &mut u64,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> bool {
+        let Some(pipeline) = self.custom_shader_pipelines.get(&shader_id) else {
+            return true; // Unknown shader — skip silently
+        };
+        let data = unsafe { Self::instance_bytes(instances) };
+        self.draw_instances(data, instances.len() as u32, pipeline, instance_offset, pass)
     }
 
     unsafe fn instance_bytes<T>(instances: &[T]) -> &[u8] {
@@ -1911,6 +2086,13 @@ impl WgpuRenderer {
                                 &mut pass,
                             ),
                         PrimitiveBatch::Surfaces(_) => true,
+                        PrimitiveBatch::CustomShaders { shader_id, range } => self
+                            .draw_custom_shaders(
+                                &scene.custom_shaders[range],
+                                shader_id,
+                                &mut instance_offset,
+                                &mut pass,
+                            ),
                     };
                     if !ok {
                         overflow = true;

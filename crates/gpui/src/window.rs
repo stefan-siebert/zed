@@ -12,7 +12,7 @@ use crate::{
     PlatformAtlas,
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, Render, RenderGlyphParams, GlowParams, RenderImage, RenderImageParams, RenderSvgParams,
+    PromptLevel, Quad, Render, RenderGlyphParams, GlowParams, CustomShaderInstance, CustomShaderId, RenderImage, RenderImageParams, RenderSvgParams,
     Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
     ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
     SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
@@ -3297,6 +3297,44 @@ impl Window {
             _effect_pad: 0,
             effect_params: quad.effect_params,
         });
+    }
+
+    /// Register a custom WGSL fragment shader for use with `paint_custom_shader`.
+    ///
+    /// The shader must define a function:
+    /// ```wgsl
+    /// fn custom_effect(position: vec2<f32>, bounds: Bounds, content_mask: Bounds,
+    ///                  params: array<f32, 16>) -> vec4<f32>
+    /// ```
+    /// Returns `None` if the platform doesn't support custom shaders.
+    pub fn register_custom_shader(
+        &self,
+        wgsl_fragment: &str,
+        label: &str,
+    ) -> Option<CustomShaderId> {
+        self.platform_window.register_custom_shader(wgsl_fragment, label)
+    }
+
+    /// Paint a custom shader instance into the scene.
+    /// The shader must have been registered via the platform renderer.
+    pub fn paint_custom_shader(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        shader_id: CustomShaderId,
+        params: [f32; 16],
+    ) {
+        self.invalidator.debug_assert_paint();
+        let scale_factor = self.scale_factor();
+        let content_mask = self.content_mask();
+        self.next_frame
+            .scene
+            .insert_primitive(CustomShaderInstance {
+                order: 0,
+                shader_id,
+                bounds: bounds.scale(scale_factor),
+                content_mask: content_mask.scale(scale_factor),
+                params,
+            });
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
