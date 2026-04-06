@@ -389,6 +389,17 @@ pub enum TextAlign {
     Right,
 }
 
+/// Text glow effect parameters for declarative styling.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TextGlow {
+    /// The color of the glow.
+    pub color: Hsla,
+    /// Embolden strength in pixels (how far the glow extends beyond the glyph outline).
+    pub embolden: f32,
+    /// Gaussian blur radius in pixels (softness of the glow).
+    pub blur_radius: f32,
+}
+
 /// The properties that can be used to style text in GPUI
 #[derive(Refineable, Clone, Debug, PartialEq)]
 #[refineable(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -437,6 +448,9 @@ pub struct TextStyle {
 
     /// The number of lines to display before truncating the text
     pub line_clamp: Option<usize>,
+
+    /// Optional glow effect rendered behind text glyphs.
+    pub glow: Option<TextGlow>,
 }
 
 impl Default for TextStyle {
@@ -458,6 +472,7 @@ impl Default for TextStyle {
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,
+            glow: None,
         }
     }
 }

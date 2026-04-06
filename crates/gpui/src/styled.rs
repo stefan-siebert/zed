@@ -1,8 +1,8 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, Hsla, JustifyContent, Length, SharedString,
-    StrikethroughStyle, StyleRefinement, TemplateColumnMinSize, TextAlign, TextOverflow,
+    FontWeight, GridPlacement, GridTemplate, Hsla, JustifyContent, Length, Pixels, SharedString,
+    StrikethroughStyle, StyleRefinement, TemplateColumnMinSize, TextAlign, TextGlow, TextOverflow,
     TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
@@ -700,6 +700,16 @@ pub trait Styled: Sized {
     /// Sets the line height of this element and its children.
     fn line_height(mut self, line_height: impl Into<DefiniteLength>) -> Self {
         self.text_style().line_height = Some(line_height.into());
+        self
+    }
+
+    /// Sets a glow effect on text rendered by this element and its children.
+    fn text_glow(mut self, color: impl Into<Hsla>, embolden: Pixels, blur_radius: Pixels) -> Self {
+        self.text_style().glow = Some(TextGlow {
+            color: color.into(),
+            embolden: f32::from(embolden),
+            blur_radius: f32::from(blur_radius),
+        });
         self
     }
 

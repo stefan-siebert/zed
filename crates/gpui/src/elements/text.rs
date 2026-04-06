@@ -492,15 +492,32 @@ impl TextLayout {
                 cx,
             )
             .log_err();
-            line.paint(
-                line_origin,
-                line_height,
-                text_style.text_align,
-                Some(bounds),
-                window,
-                cx,
-            )
-            .log_err();
+            if let Some(glow) = &text_style.glow {
+                line.paint_with_glow(
+                    line_origin,
+                    line_height,
+                    text_style.text_align,
+                    Some(bounds),
+                    glow.color,
+                    crate::GlowParams {
+                        embolden: glow.embolden,
+                        blur_radius: glow.blur_radius,
+                    },
+                    window,
+                    cx,
+                )
+                .log_err();
+            } else {
+                line.paint(
+                    line_origin,
+                    line_height,
+                    text_style.text_align,
+                    Some(bounds),
+                    window,
+                    cx,
+                )
+                .log_err();
+            }
             line_origin.y += line.size(line_height).height;
         }
     }

@@ -337,6 +337,52 @@ impl WrappedLine {
         Ok(())
     }
 
+    /// Paint this line with a glow effect underneath.
+    pub fn paint_with_glow(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        bounds: Option<Bounds<Pixels>>,
+        glow_color: Hsla,
+        glow: GlowParams,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        let align_width = match bounds {
+            Some(bounds) => Some(bounds.size.width),
+            None => self.layout.wrap_width,
+        };
+
+        // Glow pass
+        paint_line(
+            origin,
+            &self.layout.unwrapped_layout,
+            line_height,
+            align,
+            align_width,
+            &self.decoration_runs,
+            &self.wrap_boundaries,
+            Some((glow_color, glow)),
+            window,
+            cx,
+        )?;
+        // Sharp text pass
+        paint_line(
+            origin,
+            &self.layout.unwrapped_layout,
+            line_height,
+            align,
+            align_width,
+            &self.decoration_runs,
+            &self.wrap_boundaries,
+            None,
+            window,
+            cx,
+        )?;
+        Ok(())
+    }
+
     /// Paint the background of line of text to the window.
     pub fn paint_background(
         &self,
