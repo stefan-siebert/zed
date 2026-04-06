@@ -755,19 +755,22 @@ impl DirectWriteState {
         let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(texture_type)? };
 
         if bounds.right < bounds.left {
-            Ok(Bounds {
+            return Ok(Bounds {
                 origin: point(0.into(), 0.into()),
                 size: size(0.into(), 0.into()),
-            })
-        } else {
-            Ok(Bounds {
-                origin: point(bounds.left.into(), bounds.top.into()),
-                size: size(
-                    (bounds.right - bounds.left).into(),
-                    (bounds.bottom - bounds.top).into(),
-                ),
-            })
+            });
         }
+
+        // For glow glyph variants, expand the raster bounds so that the dilated/blurred
+        // outline still fits inside the atlas tile.
+        let padding = glow_padding_pixels(params);
+        Ok(Bounds {
+            origin: point((bounds.left - padding).into(), (bounds.top - padding).into()),
+            size: size(
+                (bounds.right - bounds.left + 2 * padding).into(),
+                (bounds.bottom - bounds.top + 2 * padding).into(),
+            ),
+        })
     }
 
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
@@ -818,8 +821,9 @@ impl DirectWriteState {
     ) -> Result<Vec<u8>> {
         let glyph_analysis = self.create_glyph_run_analysis(components, params)?;
         if !params.subpixel_rendering {
-            let mut bitmap_data =
-                vec![0u8; glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize];
+            let width = glyph_bounds.size.width.0 as usize;
+            let height = glyph_bounds.size.height.0 as usize;
+            let mut bitmap_data = vec![0u8; width * height];
             unsafe {
                 glyph_analysis.CreateAlphaTexture(
                     DWRITE_TEXTURE_ALIASED_1x1,
@@ -831,6 +835,19 @@ impl DirectWriteState {
                     },
                     &mut bitmap_data,
                 )?;
+            }
+
+            // Glow path: thicken the outline (max filter ≈ morphological dilation), then blur.
+            // `raster_bounds` already reserved padding around the glyph for these operations.
+            if let Some(glow) = &params.embolden {
+                let embolden_px = (glow.embolden * params.scale_factor).round() as usize;
+                if embolden_px > 0 {
+                    embolden_alpha_mask(&mut bitmap_data, width, height, embolden_px);
+                }
+                let blur_radius = glow.blur_radius * params.scale_factor;
+                if blur_radius >= 0.5 {
+                    blur_alpha_mask(&mut bitmap_data, width, height, blur_radius);
+                }
             }
 
             return Ok(bitmap_data);
@@ -1876,6 +1893,106 @@ fn is_color_glyph(
 }
 
 const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
+
+/// Number of device pixels of padding to reserve around a glyph for the glow
+/// post-processing (embolden + Gaussian blur). Returns 0 for non-glow glyphs.
+fn glow_padding_pixels(params: &RenderGlyphParams) -> i32 {
+    let Some(glow) = &params.embolden else {
+        return 0;
+    };
+    let embolden_px = (glow.embolden * params.scale_factor).ceil() as i32;
+    // Gaussian sigma = blur_radius / 2; we keep ~3 sigmas worth of contribution.
+    let blur_px = (glow.blur_radius * params.scale_factor * 1.5).ceil() as i32;
+    embolden_px + blur_px
+}
+
+/// Morphological dilation via a separable square max filter of side `2 * radius + 1`.
+/// Approximates outline emboldening on a single-channel alpha mask.
+fn embolden_alpha_mask(data: &mut [u8], width: usize, height: usize, radius: usize) {
+    if radius == 0 || width == 0 || height == 0 {
+        return;
+    }
+    let mut temp = vec![0u8; width * height];
+    // Horizontal pass: data → temp
+    for y in 0..height {
+        let row = y * width;
+        for x in 0..width {
+            let lo = x.saturating_sub(radius);
+            let hi = (x + radius).min(width - 1);
+            let mut m = 0u8;
+            for sx in lo..=hi {
+                m = m.max(data[row + sx]);
+            }
+            temp[row + x] = m;
+        }
+    }
+    // Vertical pass: temp → data
+    for y in 0..height {
+        let lo = y.saturating_sub(radius);
+        let hi = (y + radius).min(height - 1);
+        for x in 0..width {
+            let mut m = 0u8;
+            for sy in lo..=hi {
+                m = m.max(temp[sy * width + x]);
+            }
+            data[y * width + x] = m;
+        }
+    }
+}
+
+/// Separable Gaussian blur on a single-channel alpha mask.
+/// Mirrors `gpui_wgpu::cosmic_text_system::blur_alpha_mask` so the glow looks
+/// the same on Windows and Linux.
+fn blur_alpha_mask(data: &mut [u8], width: usize, height: usize, radius: f32) {
+    if width == 0 || height == 0 || radius < 0.5 {
+        return;
+    }
+    let sigma = radius / 2.0;
+    let kernel_radius = (sigma * 3.0).ceil() as usize;
+    if kernel_radius == 0 {
+        return;
+    }
+    let kernel_size = kernel_radius * 2 + 1;
+    let mut kernel = vec![0.0_f32; kernel_size];
+    let mut sum = 0.0_f32;
+    for i in 0..kernel_size {
+        let x = i as f32 - kernel_radius as f32;
+        let val = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel[i] = val;
+        sum += val;
+    }
+    for v in &mut kernel {
+        *v /= sum;
+    }
+
+    let mut temp = vec![0.0_f32; width * height];
+
+    // Horizontal pass: data → temp
+    for y in 0..height {
+        for x in 0..width {
+            let mut acc = 0.0_f32;
+            for k in 0..kernel_size {
+                let sx = x as isize + k as isize - kernel_radius as isize;
+                let sx = sx.clamp(0, width as isize - 1) as usize;
+                acc += data[y * width + sx] as f32 * kernel[k];
+            }
+            temp[y * width + x] = acc;
+        }
+    }
+
+    // Vertical pass: temp → data
+    for y in 0..height {
+        for x in 0..width {
+            let mut acc = 0.0_f32;
+            for k in 0..kernel_size {
+                let sy = y as isize + k as isize - kernel_radius as isize;
+                let sy = sy.clamp(0, height as isize - 1) as usize;
+                acc += temp[sy * width + x] * kernel[k];
+            }
+            data[y * width + x] = (acc.round() as u8).min(255);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
