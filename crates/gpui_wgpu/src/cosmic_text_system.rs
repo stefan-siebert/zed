@@ -384,10 +384,30 @@ impl CosmicTextSystemState {
             renderer.format(Format::Alpha).offset(subpixel_offset);
         }
 
+        // Apply embolden for glow glyph variants.
+        if let Some(glow) = &params.embolden {
+            renderer.embolden(glow.embolden * params.scale_factor);
+        }
+
         let glyph_id: u16 = params.glyph_id.0.try_into()?;
-        renderer
+        let mut image = renderer
             .render(&mut scaler, glyph_id)
-            .with_context(|| format!("unable to render glyph via swash for {params:?}"))
+            .with_context(|| format!("unable to render glyph via swash for {params:?}"))?;
+
+        // Apply Gaussian blur for glow variants.
+        if let Some(glow) = &params.embolden {
+            if glow.blur_radius > 0.0
+                && image.placement.width > 0
+                && image.placement.height > 0
+                && matches!(image.content, swash::scale::image::Content::Mask)
+            {
+                let w = image.placement.width as usize;
+                let h = image.placement.height as usize;
+                blur_alpha_mask(&mut image.data, w, h, glow.blur_radius * params.scale_factor);
+            }
+        }
+
+        Ok(image)
     }
 
     /// This is used when cosmic_text has chosen a fallback font instead of using the requested
@@ -680,4 +700,57 @@ fn face_info_into_properties(
 fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     // TODO: Include other common emoji fonts
     postscript_name == "NotoColorEmoji"
+}
+
+/// Separable Gaussian blur on a single-channel alpha mask.
+fn blur_alpha_mask(data: &mut [u8], width: usize, height: usize, radius: f32) {
+    if width == 0 || height == 0 || radius < 0.5 {
+        return;
+    }
+    let sigma = radius / 2.0;
+    let kernel_radius = (sigma * 3.0).ceil() as usize;
+    if kernel_radius == 0 {
+        return;
+    }
+    // Build 1D Gaussian kernel.
+    let kernel_size = kernel_radius * 2 + 1;
+    let mut kernel = vec![0.0_f32; kernel_size];
+    let mut sum = 0.0_f32;
+    for i in 0..kernel_size {
+        let x = i as f32 - kernel_radius as f32;
+        let val = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel[i] = val;
+        sum += val;
+    }
+    for v in &mut kernel {
+        *v /= sum;
+    }
+
+    let mut temp = vec![0.0_f32; width * height];
+
+    // Horizontal pass: data → temp
+    for y in 0..height {
+        for x in 0..width {
+            let mut acc = 0.0_f32;
+            for k in 0..kernel_size {
+                let sx = x as isize + k as isize - kernel_radius as isize;
+                let sx = sx.clamp(0, width as isize - 1) as usize;
+                acc += data[y * width + sx] as f32 * kernel[k];
+            }
+            temp[y * width + x] = acc;
+        }
+    }
+
+    // Vertical pass: temp → data
+    for y in 0..height {
+        for x in 0..width {
+            let mut acc = 0.0_f32;
+            for k in 0..kernel_size {
+                let sy = y as isize + k as isize - kernel_radius as isize;
+                let sy = sy.clamp(0, height as isize - 1) as usize;
+                acc += temp[sy * width + x] * kernel[k];
+            }
+            data[y * width + x] = (acc.round() as u8).min(255);
+        }
+    }
 }

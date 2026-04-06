@@ -958,11 +958,50 @@ pub(super) fn keystroke_from_xkb(
         }
     };
 
+    // When a shortcut modifier (Ctrl/Super) is held with Shift, resolve
+    // to the base (unshifted) key so that bindings like "ctrl-shift-2"
+    // work regardless of keyboard layout (Shift+2 = "!" on US, '"' on DE).
+    // This must happen after the keysym match because the fallback branch
+    // uses key_utf8 which still reflects the shifted state.
+    let key = if (modifiers.control || modifiers.platform) && modifiers.shift {
+        let keymap = state.get_keymap();
+        let layout = state.key_get_layout(keycode);
+        if let Some(&base_sym) = keymap
+            .key_get_syms_by_level(keycode, layout, 0)
+            .first()
+        {
+            if base_sym != key_sym {
+                let base_name = xkb::keysym_get_name(base_sym).to_lowercase();
+                if base_name.len() == 1
+                    && base_name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphanumeric())
+                {
+                    base_name
+                } else {
+                    key
+                }
+            } else {
+                key
+            }
+        } else {
+            key
+        }
+    } else {
+        key
+    };
+
     if modifiers.shift {
-        // we only include the shift for upper-case letters by convention,
-        // so don't include for numbers and symbols, but do include for
-        // tab/enter, etc.
-        if key.chars().count() == 1 && key.to_lowercase() == key.to_uppercase() {
+        // We only include shift for upper-case letters by convention,
+        // so strip it for numbers and symbols (but keep for tab/enter, etc.)
+        // However, when Ctrl/Super is also held this is a keyboard shortcut,
+        // not text input — keep shift so "ctrl-shift-2" works correctly.
+        if key.chars().count() == 1
+            && key.to_lowercase() == key.to_uppercase()
+            && !modifiers.control
+            && !modifiers.platform
+        {
             modifiers.shift = false;
         }
     }

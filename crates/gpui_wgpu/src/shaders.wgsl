@@ -524,6 +524,9 @@ struct Quad {
     border_color: Hsla,
     corner_radii: Corners,
     border_widths: Edges,
+    effect_type: u32,
+    _effect_pad: u32,
+    effect_params: array<f32, 4>,
 }
 @group(1) @binding(0) var<storage, read> b_quads: array<Quad>;
 
@@ -569,6 +572,26 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     }
 
     let quad = b_quads[input.quad_id];
+
+    // Effect: outer glow (type 1) — early exit before normal quad logic.
+    // effect_params = glow color [r, g, b, intensity] in linear sRGB.
+    // Renders a soft elliptical falloff from center to edges.
+    if (quad.effect_type == 1u) {
+        let half = quad.bounds.size / 2.0;
+        let center = input.position.xy - quad.bounds.origin - half;
+        // Elliptical distance for aspect-ratio-correct falloff
+        let nd = vec2<f32>(center.x / half.x, center.y / half.y);
+        let d = length(nd);
+        let f = saturate(1.0 - d);
+        let glow_a = quad.effect_params[3];
+        let alpha = glow_a * f;
+        return vec4<f32>(
+            quad.effect_params[0] * f,
+            quad.effect_params[1] * f,
+            quad.effect_params[2] * f,
+            alpha,
+        );
+    }
 
     let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
         input.background_solid, input.background_color0, input.background_color1);

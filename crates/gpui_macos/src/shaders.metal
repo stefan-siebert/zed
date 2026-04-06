@@ -393,7 +393,19 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                 saturate(antialias_threshold - inner_sdf));
   }
 
-  return color * float4(1.0, 1.0, 1.0, saturate(antialias_threshold - outer_sdf));
+  float4 final_color = color * float4(1.0, 1.0, 1.0, saturate(antialias_threshold - outer_sdf));
+
+  // Effect: outer glow (type 1)
+  if (quad.effect_type == 1) {
+    float4 glow_color = float4(quad.effect_params[0], quad.effect_params[1],
+                               quad.effect_params[2], quad.effect_params[3]);
+    float max_dist = min(half_size.x, half_size.y);
+    float t = saturate(outer_sdf / max_dist);
+    float glow_alpha = glow_color.a * (1.0 - t * t);
+    final_color = final_color + float4(glow_color.rgb * glow_alpha, glow_alpha) * (1.0 - final_color.a);
+  }
+
+  return final_color;
 }
 
 // Returns the dash velocity of a corner given the dash velocity of the two

@@ -1,7 +1,7 @@
 use crate::{
-    App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window,
-    WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
+    App, Bounds, DevicePixels, GlowParams, Half, Hsla, LineLayout, Pixels, Point,
+    RenderGlyphParams, Result, ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign,
+    UnderlineStyle, Window, WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
@@ -97,10 +97,54 @@ impl ShapedLine {
             align_width,
             &self.decoration_runs,
             &[],
+            None,
             window,
             cx,
         )?;
 
+        Ok(())
+    }
+
+    /// Paint the line with a glow effect underneath.
+    /// First paints the glow pass (emboldened + blurred glyphs in `glow_color`),
+    /// then paints the sharp text on top.
+    pub fn paint_with_glow(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        glow_color: Hsla,
+        glow: GlowParams,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        // Glow pass
+        paint_line(
+            origin,
+            &self.layout,
+            line_height,
+            align,
+            align_width,
+            &self.decoration_runs,
+            &[],
+            Some((glow_color, glow)),
+            window,
+            cx,
+        )?;
+        // Sharp text pass
+        paint_line(
+            origin,
+            &self.layout,
+            line_height,
+            align,
+            align_width,
+            &self.decoration_runs,
+            &[],
+            None,
+            window,
+            cx,
+        )?;
         Ok(())
     }
 
@@ -285,6 +329,7 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            None,
             window,
             cx,
         )?;
@@ -331,6 +376,7 @@ fn paint_line(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    glow: Option<(Hsla, GlowParams)>,
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
@@ -508,7 +554,19 @@ fn paint_line(
                 let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
                     let vertical_offset = point(px(0.0), glyph.position.y);
-                    if glyph.is_emoji {
+                    if let Some((glow_color, glow_params)) = &glow {
+                        // Glow pass: paint emboldened + blurred glyph in glow color
+                        if !glyph.is_emoji {
+                            window.paint_glyph_glow(
+                                glyph_origin + baseline_offset + vertical_offset,
+                                run.font_id,
+                                glyph.id,
+                                layout.font_size,
+                                *glow_color,
+                                *glow_params,
+                            )?;
+                        }
+                    } else if glyph.is_emoji {
                         window.paint_emoji(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,

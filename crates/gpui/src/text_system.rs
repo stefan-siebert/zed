@@ -1055,6 +1055,31 @@ pub struct GlyphId(pub u32);
 /// Parameters for rendering a glyph, used as cache keys for raster bounds.
 ///
 /// This struct identifies a specific glyph rendering configuration including
+/// Glyph glow rasterization parameters.
+#[derive(Clone, Copy, Debug)]
+pub struct GlowParams {
+    /// Embolden strength in pixels (before scale_factor).
+    pub embolden: f32,
+    /// Gaussian blur radius applied to the alpha mask after rasterization.
+    pub blur_radius: f32,
+}
+
+impl PartialEq for GlowParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.embolden.to_bits() == other.embolden.to_bits()
+            && self.blur_radius.to_bits() == other.blur_radius.to_bits()
+    }
+}
+
+impl Eq for GlowParams {}
+
+impl Hash for GlowParams {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.embolden.to_bits().hash(state);
+        self.blur_radius.to_bits().hash(state);
+    }
+}
+
 /// font, size, subpixel positioning, and scale factor. It's used to look up
 /// cached raster bounds and sprite atlas entries.
 #[derive(Clone, Debug, PartialEq)]
@@ -1067,6 +1092,9 @@ pub struct RenderGlyphParams {
     pub scale_factor: f32,
     pub is_emoji: bool,
     pub subpixel_rendering: bool,
+    /// When set, rasterizes a dilated version of the glyph for glow effects.
+    /// The value is the embolden strength in pixels (before scale_factor).
+    pub embolden: Option<GlowParams>,
 }
 
 impl Eq for RenderGlyphParams {}
@@ -1080,6 +1108,10 @@ impl Hash for RenderGlyphParams {
         self.scale_factor.to_bits().hash(state);
         self.is_emoji.hash(state);
         self.subpixel_rendering.hash(state);
+        self.embolden.is_some().hash(state);
+        if let Some(glow) = &self.embolden {
+            glow.hash(state);
+        }
     }
 }
 

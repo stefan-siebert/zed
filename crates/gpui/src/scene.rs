@@ -493,6 +493,12 @@ pub struct Quad {
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
+    /// Effect type: 0 = none, 1 = outer glow.
+    pub effect_type: u32,
+    pub _effect_pad: u32,
+    /// Effect parameters (interpretation depends on effect_type).
+    /// Glow: [r, g, b, a] as linear sRGB premultiplied color.
+    pub effect_params: [f32; 4],
 }
 
 impl From<Quad> for Primitive {

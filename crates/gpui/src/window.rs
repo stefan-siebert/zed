@@ -12,7 +12,7 @@ use crate::{
     PlatformAtlas,
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
+    PromptLevel, Quad, Render, RenderGlyphParams, GlowParams, RenderImage, RenderImageParams, RenderSvgParams,
     Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
     ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
     SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
@@ -3293,6 +3293,9 @@ impl Window {
             corner_radii: quad.corner_radii.scale(scale_factor),
             border_widths: quad.border_widths.scale(scale_factor),
             border_style: quad.border_style,
+            effect_type: quad.effect_type,
+            _effect_pad: 0,
+            effect_params: quad.effect_params,
         });
     }
 
@@ -3387,6 +3390,21 @@ impl Window {
     /// This method is only useful if you need to paint a single glyph that has already been shaped.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
+    /// Paint a glow layer for a glyph. The glyph is rasterized with embolden
+    /// and Gaussian blur, then rendered as a `MonochromeSprite` with the given color.
+    /// Call this before `paint_glyph` so the glow renders underneath the sharp text.
+    pub fn paint_glyph_glow(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        glow: GlowParams,
+    ) -> Result<()> {
+        self.paint_glyph_inner(origin, font_id, glyph_id, font_size, color, Some(glow))
+    }
+
     pub fn paint_glyph(
         &mut self,
         origin: Point<Pixels>,
@@ -3394,6 +3412,18 @@ impl Window {
         glyph_id: GlyphId,
         font_size: Pixels,
         color: Hsla,
+    ) -> Result<()> {
+        self.paint_glyph_inner(origin, font_id, glyph_id, font_size, color, None)
+    }
+
+    fn paint_glyph_inner(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        embolden: Option<GlowParams>,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -3405,7 +3435,12 @@ impl Window {
             x: (glyph_origin.x.0.fract() * SUBPIXEL_VARIANTS_X as f32).floor() as u8,
             y: (glyph_origin.y.0.fract() * SUBPIXEL_VARIANTS_Y as f32).floor() as u8,
         };
-        let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
+        // Glow glyphs always use monochrome (no subpixel AA on blurred shapes).
+        let subpixel_rendering = if embolden.is_some() {
+            false
+        } else {
+            self.should_use_subpixel_rendering(font_id, font_size)
+        };
         let params = RenderGlyphParams {
             font_id,
             glyph_id,
@@ -3414,6 +3449,7 @@ impl Window {
             scale_factor,
             is_emoji: false,
             subpixel_rendering,
+            embolden,
         };
 
         let raster_bounds = self.text_system().raster_bounds(&params)?;
@@ -3597,6 +3633,7 @@ impl Window {
             scale_factor,
             is_emoji: true,
             subpixel_rendering: false,
+            embolden: None,
         };
 
         let raster_bounds = self.text_system().raster_bounds(&params)?;
@@ -5854,6 +5891,10 @@ pub struct PaintQuad {
     pub border_color: Hsla,
     /// The style of the quad's borders.
     pub border_style: BorderStyle,
+    /// Effect type: 0 = none, 1 = outer glow.
+    pub effect_type: u32,
+    /// Effect parameters (interpretation depends on effect_type).
+    pub effect_params: [f32; 4],
 }
 
 impl PaintQuad {
@@ -5906,6 +5947,8 @@ pub fn quad(
         border_widths: border_widths.into(),
         border_color: border_color.into(),
         border_style,
+        effect_type: 0,
+        effect_params: [0.0; 4],
     }
 }
 
@@ -5918,6 +5961,8 @@ pub fn fill(bounds: impl Into<Bounds<Pixels>>, background: impl Into<Background>
         border_widths: (0.).into(),
         border_color: transparent_black(),
         border_style: BorderStyle::default(),
+        effect_type: 0,
+        effect_params: [0.0; 4],
     }
 }
 
@@ -5934,5 +5979,7 @@ pub fn outline(
         border_widths: (1.).into(),
         border_color: border_color.into(),
         border_style,
+        effect_type: 0,
+        effect_params: [0.0; 4],
     }
 }
