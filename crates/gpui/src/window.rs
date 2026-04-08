@@ -3443,6 +3443,9 @@ impl Window {
         self.paint_glyph_inner(origin, font_id, glyph_id, font_size, color, Some(glow))
     }
 
+    /// Paint a single shaped glyph at the given origin without any glow
+    /// effect. This is the standard fast path used by the text renderer;
+    /// for the emboldened + blurred glow variant see [`Window::paint_glyph_glow`].
     pub fn paint_glyph(
         &mut self,
         origin: Point<Pixels>,
