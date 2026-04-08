@@ -156,16 +156,24 @@ impl WindowsKeyboardMapper {
 
 pub(crate) fn get_keystroke_key(
     vkey: VIRTUAL_KEY,
-    scan_code: u32,
-    modifiers: &mut Modifiers,
+    _scan_code: u32,
+    _modifiers: &mut Modifiers,
 ) -> Option<String> {
-    if modifiers.shift && need_to_convert_to_shifted_key(vkey) {
-        get_shifted_key(vkey, scan_code).inspect(|_| {
-            modifiers.shift = false;
-        })
-    } else {
-        get_key_from_vkey(vkey)
-    }
+    // Always return the unshifted (label) form of the key. The shifted
+    // character (e.g. "!" for shift+1) is already exposed separately via
+    // `Keystroke::key_char` from `process_key`, and the matcher knows how
+    // to fall through key_char when needed. Keeping `key` as the label
+    // ensures `KeyBinding::new("ctrl-shift-1", …)` — which the
+    // DummyKeyboardMapper does not substitute — actually matches the typed
+    // keystroke, instead of the binding being `{ctrl, shift, "1"}` and the
+    // typed keystroke being `{ctrl, "!"}` (which never matches).
+    //
+    // Previously this function called `get_shifted_key` and cleared
+    // `modifiers.shift`, on the assumption that the binding side would do
+    // the same substitution. That assumption only holds when bindings are
+    // routed through `WindowsKeyboardMapper::process_keystroke`, which is
+    // not the case for `KeyBinding::new()` callers (most embedders).
+    get_key_from_vkey(vkey)
 }
 
 fn get_key_from_vkey(vkey: VIRTUAL_KEY) -> Option<String> {
@@ -180,37 +188,9 @@ fn get_key_from_vkey(vkey: VIRTUAL_KEY) -> Option<String> {
     Some(key.to_ascii_lowercase().to_string())
 }
 
-#[inline]
-fn need_to_convert_to_shifted_key(vkey: VIRTUAL_KEY) -> bool {
-    matches!(
-        vkey,
-        VK_OEM_3
-            | VK_OEM_MINUS
-            | VK_OEM_PLUS
-            | VK_OEM_4
-            | VK_OEM_5
-            | VK_OEM_6
-            | VK_OEM_1
-            | VK_OEM_7
-            | VK_OEM_COMMA
-            | VK_OEM_PERIOD
-            | VK_OEM_2
-            | VK_OEM_102
-            | VK_OEM_8
-            | VK_ABNT_C1
-            | VK_0
-            | VK_1
-            | VK_2
-            | VK_3
-            | VK_4
-            | VK_5
-            | VK_6
-            | VK_7
-            | VK_8
-            | VK_9
-    )
-}
-
+/// Generate the shifted variant of a key (e.g. VK_1 → "!" on US layouts).
+/// Used by `WindowsKeyboardMapper::new()` to populate the key→vkey lookup
+/// for bindings written using the shifted character form.
 fn get_shifted_key(vkey: VIRTUAL_KEY, scan_code: u32) -> Option<String> {
     generate_key_char(vkey, scan_code, false, true, false)
 }
