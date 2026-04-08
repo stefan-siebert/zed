@@ -63,6 +63,13 @@ impl PlatformKeyboardMapper for WindowsKeyboardMapper {
             return KeybindingKeystroke::from_keystroke(keystroke);
         };
 
+        // When shift is involved we substitute the key with its shifted form
+        // ("1" -> "!"). The runtime keystroke from `get_keystroke_key` does
+        // the same substitution AND clears `modifiers.shift`, so we have to
+        // clear it on the binding side too — otherwise a binding written as
+        // `ctrl-shift-1` ends up with modifiers={ctrl,shift} key="!" while
+        // the typed keystroke is modifiers={ctrl} key="!", and they don't
+        // match. This previously broke ctrl-shift-<digit> bindings entirely.
         keystroke.key = if shift {
             let Some(shifted_key) = self.vkey_to_shifted.get(&vkey).cloned() else {
                 log::error!(
@@ -78,7 +85,9 @@ impl PlatformKeyboardMapper for WindowsKeyboardMapper {
         };
 
         let modifiers = Modifiers {
-            shift,
+            // Already cleared above; keep it cleared so binding modifiers
+            // match the runtime keystroke after shifted-key substitution.
+            shift: false,
             ..keystroke.modifiers
         };
 
