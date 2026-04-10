@@ -14,7 +14,7 @@ use windows::Win32::{
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT},
     },
-    UI::Shell::{DragQueryFileW, HDROP},
+    UI::Shell::{DROPFILES, DragQueryFileW, HDROP},
 };
 use windows::core::{Owned, PCWSTR};
 
@@ -78,7 +78,7 @@ pub(crate) fn write_to_clipboard(item: ClipboardItem) {
             match entry {
                 ClipboardEntry::String(string) => write_string(string)?,
                 ClipboardEntry::Image(image) => write_image(image)?,
-                ClipboardEntry::ExternalPaths(_) => {}
+                ClipboardEntry::ExternalPaths(paths) => write_files(paths)?,
             }
         }
         Ok(())
@@ -224,6 +224,39 @@ fn convert_to_png(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
         .map_err(|e| log::warn!("Failed to encode PNG: {e}"))
         .ok()?;
     Some(buf)
+}
+
+fn write_files(paths: &ExternalPaths) -> Result<()> {
+    // CF_HDROP format: DROPFILES header + double-null-terminated UTF-16 file list
+    let header_size = std::mem::size_of::<DROPFILES>() as u32;
+    let mut wide_paths: Vec<u16> = Vec::new();
+    for path in &paths.0 {
+        let path_str = path.to_string_lossy();
+        wide_paths.extend(path_str.encode_utf16());
+        wide_paths.push(0); // null terminator per path
+    }
+    wide_paths.push(0); // final null terminator
+
+    let total_size = header_size as usize + wide_paths.len() * std::mem::size_of::<u16>();
+    unsafe {
+        let global = Owned::new(GlobalAlloc(GMEM_MOVEABLE, total_size)?);
+        let ptr = GlobalLock(*global);
+        anyhow::ensure!(!ptr.is_null(), "GlobalLock returned null");
+
+        // Write DROPFILES header
+        let dropfiles = ptr as *mut DROPFILES;
+        (*dropfiles).pFiles = header_size;
+        (*dropfiles).fWide = true.into();
+
+        // Write file paths after header
+        let data_ptr = (ptr as *mut u8).add(header_size as usize) as *mut u16;
+        std::ptr::copy_nonoverlapping(wide_paths.as_ptr(), data_ptr, wide_paths.len());
+
+        GlobalUnlock(*global).ok();
+        SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(global.0)))?;
+        std::mem::forget(global);
+    }
+    Ok(())
 }
 
 fn read_string() -> Option<ClipboardEntry> {

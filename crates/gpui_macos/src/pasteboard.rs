@@ -175,7 +175,9 @@ impl Pasteboard {
                 [ClipboardEntry::Image(image)] => {
                     self.write_image(image);
                 }
-                [ClipboardEntry::ExternalPaths(_)] => {}
+                [ClipboardEntry::ExternalPaths(paths)] => {
+                    self.write_files(paths);
+                }
                 _ => {
                     // Agus NB: We're currently only writing string entries to the clipboard when we have more than one.
                     //
@@ -236,6 +238,41 @@ impl Pasteboard {
                 self.inner
                     .setData_forType(metadata_bytes, self.metadata_type);
             }
+        }
+    }
+
+    unsafe fn write_files(&self, paths: &ExternalPaths) {
+        unsafe {
+            let ns_paths: Vec<id> = paths
+                .0
+                .iter()
+                .map(|p| ns_string(&p.to_string_lossy()))
+                .collect();
+            let ns_array = NSArray::arrayWithObjects(nil, &ns_paths);
+
+            let mut types = vec![NSFilenamesPboardType];
+            types.push(NSPasteboardTypeString);
+
+            let types_array = NSArray::arrayWithObjects(nil, &types);
+            self.inner.declareTypes_owner(types_array, nil);
+
+            self.inner
+                .setPropertyList_forType(ns_array, NSFilenamesPboardType);
+
+            // Also provide a plain text representation for text editors
+            let joined: String = paths
+                .0
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let bytes = NSData::dataWithBytes_length_(
+                nil,
+                joined.as_ptr() as *const c_void,
+                joined.len() as u64,
+            );
+            self.inner
+                .setData_forType(bytes, NSPasteboardTypeString);
         }
     }
 

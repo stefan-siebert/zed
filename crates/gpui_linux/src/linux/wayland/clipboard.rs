@@ -177,20 +177,37 @@ impl Clipboard {
         self.self_mime.clone()
     }
 
-    pub fn send(&self, _mime_type: String, fd: OwnedFd) {
-        if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
-            self.send_internal_bytes(fd, text.as_bytes().to_owned());
+    pub fn send(&self, mime_type: String, fd: OwnedFd) {
+        if let Some(bytes) = self.contents_as_bytes(&mime_type) {
+            self.send_internal_bytes(fd, bytes);
         }
     }
 
-    pub fn send_primary(&self, _mime_type: String, fd: OwnedFd) {
-        if let Some(text) = self
-            .primary_contents
-            .as_ref()
-            .and_then(|contents| contents.text())
-        {
-            self.send_internal_bytes(fd, text.as_bytes().to_owned());
+    pub fn send_primary(&self, mime_type: String, fd: OwnedFd) {
+        if let Some(bytes) = self.primary_contents_as_bytes(&mime_type) {
+            self.send_internal_bytes(fd, bytes);
         }
+    }
+
+    fn contents_as_bytes(&self, mime_type: &str) -> Option<Vec<u8>> {
+        Self::item_as_bytes(self.contents.as_ref()?, mime_type)
+    }
+
+    fn primary_contents_as_bytes(&self, mime_type: &str) -> Option<Vec<u8>> {
+        Self::item_as_bytes(self.primary_contents.as_ref()?, mime_type)
+    }
+
+    fn item_as_bytes(item: &ClipboardItem, mime_type: &str) -> Option<Vec<u8>> {
+        if mime_type == FILE_LIST_MIME_TYPE {
+            // Serve file URIs from ExternalPaths entries
+            for entry in item.entries() {
+                if let ClipboardEntry::ExternalPaths(paths) = entry {
+                    return Some(paths_to_uri_list(&paths.0));
+                }
+            }
+        }
+        // Fall back to text
+        item.text().map(|t| t.as_bytes().to_owned())
     }
 
     pub fn read(&mut self) -> Option<ClipboardItem> {
@@ -229,6 +246,13 @@ impl Clipboard {
         Some(item)
     }
 
+    /// Whether the current clipboard contents include file paths.
+    pub fn has_external_paths(&self) -> bool {
+        self.contents
+            .as_ref()
+            .is_some_and(|item| item.entries().iter().any(|e| matches!(e, ClipboardEntry::ExternalPaths(_))))
+    }
+
     /// Write raw bytes to a file descriptor asynchronously via the calloop event loop.
     /// Used by both clipboard sends and native drag-and-drop data transfers.
     pub(crate) fn send_internal_bytes(&self, fd: OwnedFd, bytes: Vec<u8>) {
@@ -259,4 +283,35 @@ impl Clipboard {
             )
             .unwrap();
     }
+}
+
+/// Convert a list of paths to `text/uri-list` format (`file:///path\r\n` per entry).
+pub(crate) fn paths_to_uri_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    let mut result = String::new();
+    for path in paths {
+        // Percent-encode the path for URI safety (spaces, special chars)
+        let absolute = if path.is_absolute() {
+            path.to_string_lossy().into_owned()
+        } else {
+            std::path::Path::new("/")
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        result.push_str("file://");
+        for byte in absolute.bytes() {
+            match byte {
+                // RFC 3986 unreserved characters + path separators
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+                | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                    result.push(byte as char);
+                }
+                _ => {
+                    result.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+        result.push_str("\r\n");
+    }
+    result.into_bytes()
 }

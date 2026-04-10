@@ -1,5 +1,5 @@
 mod client;
-mod clipboard;
+pub(crate) mod clipboard;
 mod cursor;
 mod display;
 mod serial;

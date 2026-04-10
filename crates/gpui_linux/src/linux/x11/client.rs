@@ -1707,15 +1707,39 @@ impl LinuxClient for X11Client {
 
     fn write_to_clipboard(&self, item: gpui::ClipboardItem) {
         let mut state = self.0.borrow_mut();
-        state
-            .clipboard
-            .set_text(
-                std::borrow::Cow::Owned(item.text().unwrap_or_default()),
-                clipboard::ClipboardKind::Clipboard,
-                clipboard::WaitConfig::None,
-            )
-            .context("X11: Failed to write to clipboard (clipboard)")
-            .log_with_level(log::Level::Debug);
+
+        // Check if the item contains file paths
+        let has_paths = item
+            .entries()
+            .iter()
+            .any(|e| matches!(e, gpui::ClipboardEntry::ExternalPaths(_)));
+
+        if has_paths {
+            for entry in item.entries() {
+                if let gpui::ClipboardEntry::ExternalPaths(paths) = entry {
+                    state
+                        .clipboard
+                        .set_paths(
+                            paths.paths(),
+                            clipboard::ClipboardKind::Clipboard,
+                            clipboard::WaitConfig::None,
+                        )
+                        .context("X11: Failed to write file paths to clipboard")
+                        .log_with_level(log::Level::Debug);
+                    break;
+                }
+            }
+        } else {
+            state
+                .clipboard
+                .set_text(
+                    std::borrow::Cow::Owned(item.text().unwrap_or_default()),
+                    clipboard::ClipboardKind::Clipboard,
+                    clipboard::WaitConfig::None,
+                )
+                .context("X11: Failed to write to clipboard (clipboard)")
+                .log_with_level(log::Level::Debug);
+        }
         state.clipboard_item.replace(item);
     }
 
