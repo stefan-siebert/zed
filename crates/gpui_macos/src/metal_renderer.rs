@@ -843,6 +843,7 @@ impl MetalRenderer {
                     command_encoder,
                 ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+                PrimitiveBatch::CustomShaders { .. } => true,
             };
             if !ok {
                 command_encoder.end_encoding();
