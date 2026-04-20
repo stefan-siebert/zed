@@ -409,7 +409,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   // Effect 3: Vignette
   if (quad.effect_type == 3) {
-    float2 center = input.position.xy - quad.bounds.origin - half_size;
+    float2 center = input.position.xy - float2(quad.bounds.origin.x, quad.bounds.origin.y) - half_size;
     float2 nd = float2(center.x / half_size.x, center.y / half_size.y) * quad.effect_params[2];
     float d = length(nd);
     float radius = quad.effect_params[1];
@@ -419,7 +419,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   // Effect 4: Shimmer
   if (quad.effect_type == 4) {
-    float uv_x = (input.position.xy.x - quad.bounds.origin.x) / quad.bounds.size.x;
+    float uv_x = (input.position.xy.x - quad.bounds.origin.x) / quad.bounds.size.width;
     float sweep = fract(quad.effect_params[3] * quad.effect_params[0]);
     float width = quad.effect_params[1];
     float dist = abs(uv_x - sweep);
