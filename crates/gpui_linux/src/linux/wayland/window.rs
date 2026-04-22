@@ -51,6 +51,16 @@ pub(crate) struct Callbacks {
     close: Option<Box<dyn FnOnce()>>,
     appearance_changed: Option<Box<dyn FnMut()>>,
     button_layout_changed: Option<Box<dyn FnMut()>>,
+    /// Set once `WaylandWindowStatePtr::close` runs.  Late-arriving
+    /// compositor events (pointer motion, focus change, etc.) that
+    /// were already in the calloop queue when we removed the window
+    /// would otherwise call `AnyWindowHandle::update` on a map entry
+    /// that no longer exists, producing a spurious `ERROR gpui::window:
+    /// window not found` backtrace.  Handle_input and peers guard on
+    /// this flag and silently drop the event — the window is gone and
+    /// has nowhere to forward it.  Mirrors the Windows fix at
+    /// gpui_windows/src/window.rs (commit 0f4c1776d0).
+    closed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -996,12 +1006,21 @@ impl WaylandWindowStatePtr {
             }
         }
         let mut callbacks = self.callbacks.borrow_mut();
+        // Flip BEFORE running the close callback — that callback is what
+        // removes the window from App's map, and any compositor event
+        // landing after this point would otherwise try to update the
+        // now-missing entry.
+        callbacks.closed = true;
         if let Some(fun) = callbacks.close.take() {
+            drop(callbacks);
             fun()
         }
     }
 
     pub fn handle_input(&self, input: PlatformInput) {
+        if self.callbacks.borrow().closed {
+            return;
+        }
         if self.is_blocked() {
             return;
         }
