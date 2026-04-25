@@ -122,6 +122,15 @@ struct WgpuResources {
     path_msaa_view: Option<wgpu::TextureView>,
 }
 
+impl WgpuResources {
+    fn invalidate_intermediate_textures(&mut self) {
+        self.path_intermediate_texture = None;
+        self.path_intermediate_view = None;
+        self.path_msaa_texture = None;
+        self.path_msaa_view = None;
+    }
+}
+
 pub struct WgpuRenderer {
     /// Shared GPU context for device recovery coordination (unused on WASM).
     #[allow(dead_code)]
@@ -149,6 +158,7 @@ pub struct WgpuRenderer {
     surface_configured: bool,
     custom_shader_pipelines: HashMap<CustomShaderId, wgpu::RenderPipeline>,
     next_custom_shader_id: u32,
+    needs_redraw: bool,
 }
 
 impl WgpuRenderer {
@@ -220,10 +230,7 @@ impl WgpuRenderer {
             None => ctx_ref.insert(WgpuContext::new(instance, &surface, compositor_gpu)?),
         };
 
-        let atlas = Arc::new(WgpuAtlas::new(
-            Arc::clone(&context.device),
-            Arc::clone(&context.queue),
-        ));
+        let atlas = Arc::new(WgpuAtlas::from_context(context));
 
         Self::new_internal(
             Some(Rc::clone(&gpu_context)),
@@ -246,10 +253,7 @@ impl WgpuRenderer {
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?;
 
-        let atlas = Arc::new(WgpuAtlas::new(
-            Arc::clone(&context.device),
-            Arc::clone(&context.queue),
-        ));
+        let atlas = Arc::new(WgpuAtlas::from_context(context));
 
         Self::new_internal(None, context, surface, config, None, atlas)
     }
@@ -485,6 +489,7 @@ impl WgpuRenderer {
             surface_configured: true,
             custom_shader_pipelines: HashMap::new(),
             next_custom_shader_id: 0,
+            needs_redraw: false,
         })
     }
 
@@ -984,10 +989,7 @@ impl WgpuRenderer {
             // Invalidate intermediate textures - they will be lazily recreated
             // in draw() after we confirm the surface is healthy. This avoids
             // panics when the device/surface is in an invalid state during resize.
-            resources.path_intermediate_texture = None;
-            resources.path_intermediate_view = None;
-            resources.path_msaa_texture = None;
-            resources.path_msaa_view = None;
+            resources.invalidate_intermediate_textures();
         }
     }
 
@@ -1088,10 +1090,19 @@ impl WgpuRenderer {
         if let Some(error) = last_error {
             self.failed_frame_count += 1;
             log::error!(
-                "GPU error during frame (failure {} of 20): {error}",
+                "GPU error during frame (failure {} of 10): {error}",
                 self.failed_frame_count
             );
-            if self.failed_frame_count > 20 {
+
+            // TBD. Does retrying more actually help?
+            if self.failed_frame_count > 5 {
+                if let Some(res) = self.resources.as_mut() {
+                    res.invalidate_intermediate_textures();
+                }
+                self.atlas.clear();
+                self.needs_redraw = true;
+                return;
+            } else if self.failed_frame_count > 10 {
                 panic!("Too many consecutive GPU errors. Last error: {error}");
             }
         } else {
@@ -1849,10 +1860,7 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
         self.surface_configured = false;
         // Drop intermediate textures since they reference the old surface size.
         if let Some(res) = self.resources.as_mut() {
-            res.path_intermediate_texture = None;
-            res.path_intermediate_view = None;
-            res.path_msaa_texture = None;
-            res.path_msaa_view = None;
+            res.invalidate_intermediate_textures();
         }
     }
 
@@ -1902,10 +1910,7 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
             res.surface = surface;
 
             // Invalidate intermediate textures — they'll be recreated lazily.
-            res.path_intermediate_texture = None;
-            res.path_intermediate_view = None;
-            res.path_msaa_texture = None;
-            res.path_msaa_view = None;
+            res.invalidate_intermediate_textures();
         }
 
         self.surface_configured = true;
@@ -2207,6 +2212,12 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
         self.device_lost.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Returns true if a redraw is needed because GPU state was cleared.
+    /// Calling this method clears the flag.
+    pub fn needs_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.needs_redraw)
+    }
+
     /// Recovers from a lost GPU device by recreating the renderer with a new context.
     ///
     /// Call this after detecting `device_lost()` returns true.
@@ -2265,8 +2276,7 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
         let context = ctx_ref.as_ref().expect("context should exist");
 
         self.resources = None;
-        self.atlas
-            .handle_device_lost(Arc::clone(&context.device), Arc::clone(&context.queue));
+        self.atlas.handle_device_lost(context);
 
         *self = Self::new_internal(
             Some(gpu_context.clone()),

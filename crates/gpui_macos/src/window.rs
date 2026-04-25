@@ -628,6 +628,7 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
+            ..
         }: WindowParams,
         foreground_executor: ForegroundExecutor,
         background_executor: BackgroundExecutor,
@@ -1438,6 +1439,14 @@ impl PlatformWindow for MacWindow {
         self.0.lock().move_traffic_light();
     }
 
+    fn set_document_path(&self, path: Option<&std::path::Path>) {
+        unsafe {
+            let window = self.0.lock().native_window;
+            let filename = path.map_or(ns_string(""), |p| ns_string(&p.to_string_lossy()));
+            let _: () = msg_send![window, setRepresentedFilename: filename];
+        }
+    }
+
     fn show_character_palette(&self) {
         let this = self.0.lock();
         let window = this.native_window;
@@ -1701,12 +1710,7 @@ impl rwh::HasWindowHandle for MacWindow {
 
 impl rwh::HasDisplayHandle for MacWindow {
     fn display_handle(&self) -> Result<rwh::DisplayHandle<'_>, rwh::HandleError> {
-        // SAFETY: This is a no-op on macOS
-        unsafe {
-            Ok(rwh::DisplayHandle::borrow_raw(
-                rwh::AppKitDisplayHandle::new().into(),
-            ))
-        }
+        Ok(rwh::DisplayHandle::appkit())
     }
 }
 
