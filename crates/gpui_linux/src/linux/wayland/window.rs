@@ -132,6 +132,16 @@ pub struct WaylandWindowState {
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
     client_inset: Option<Pixels>,
+    /// Logical viewport destination to apply on the next frame_callback.
+    /// Deferred so it commits atomically with the freshly-rendered buffer
+    /// (eager `wp_viewport.set_destination` makes Mutter scale the still-
+    /// old buffer to the new logical size for one frame).
+    pending_viewport_dest: Option<Size<Pixels>>,
+    /// Device-pixel size for `WgpuRenderer::update_drawable_size` on the
+    /// next frame_callback. Deferred for the same reason: wgpu's wayland
+    /// surface re-configuration touches wl_surface state and an eager
+    /// reconfigure leaves the surface re-shaped without a fresh buffer.
+    pending_drawable_size: Option<Size<DevicePixels>>,
 }
 
 pub enum WaylandSurfaceState {
@@ -405,6 +415,8 @@ impl WaylandWindowState {
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
+            pending_viewport_dest: None,
+            pending_drawable_size: None,
         })
     }
 
@@ -585,6 +597,15 @@ impl WaylandWindowStatePtr {
         state.resize_throttle = false;
         let force_render = state.force_render_after_recovery;
         state.force_render_after_recovery = false;
+        // NOTE: pending_drawable_size and pending_viewport_dest are NOT
+        // applied here. Applying them in frame() would commit the new
+        // surface size + viewport destination via the unconditional
+        // surface.commit() in completed_frame() — even when no draw runs
+        // this tick (gpui only draws when invalidator.is_dirty(), which
+        // arrives via the async on_resize -> bounds_changed path and may
+        // miss the first frame_callback after a configure). Applying them
+        // in draw() instead guarantees they only commit when a fresh
+        // buffer of that exact size is also attached. See draw().
         drop(state);
 
         let mut cb = self.callbacks.borrow_mut();
@@ -620,10 +641,6 @@ impl WaylandWindowStatePtr {
                     state.maximized = configure.maximized;
                     state.tiling = configure.tiling;
                     // Limit interactive resizes to once per vblank.
-                    // We still must ack_configure + set_geometry below (Wayland protocol
-                    // requires every configure to be acknowledged), but we skip the
-                    // expensive resize/relayout until the next frame callback clears
-                    // the throttle.
                     if configure.resizing && state.resize_throttle {
                         skip_resize = true;
                     } else if configure.resizing {
@@ -649,6 +666,19 @@ impl WaylandWindowStatePtr {
                         }
                     }
                 }
+            }
+            // If we skipped processing this configure (resize_throttle), do
+            // NOT ack_configure or set_geometry. Acking the new configure
+            // while still claiming the OLD geometry tells the compositor
+            // "I accept your new size" but "my window's geometry is the
+            // previous (smaller) one" — Mutter then shifts/scales the
+            // already-rendered old buffer to reconcile the mismatch, which
+            // appears as a persistent 1px wabbern during interactive
+            // resizes. Mutter tolerates a missing ack on transient
+            // configures and re-issues / supersedes them; we'll process
+            // the next non-throttled configure normally.
+            if skip_resize {
+                return;
             }
             let mut state = self.state.borrow_mut();
             state.surface_state.ack_configure(serial);
@@ -967,7 +997,24 @@ impl WaylandWindowStatePtr {
                 state.scale = scale;
             }
             let device_bounds = state.bounds.to_device_pixels(state.scale);
-            state.renderer.update_drawable_size(device_bounds.size);
+            // Queue the wgpu surface re-configure for the next draw().
+            // See `pending_drawable_size` field doc for why this can't be
+            // applied here (or even in frame()): the unconditional
+            // surface.commit() in completed_frame() would commit it with
+            // the previous buffer, causing Mutter to scale the stale
+            // buffer onto the new geometry — a 1px wabbern per configure.
+            state.pending_drawable_size = Some(device_bounds.size);
+            // Force a draw on the next frame_callback. Otherwise, gpui's
+            // bounds_changed (which arrives via an async on_resize handler)
+            // may not have marked the invalidator dirty by the time the
+            // next frame_callback fires, in which case complete_frame()
+            // commits surface state with the OLD buffer — Mutter scales
+            // that stale buffer to the new geometry, visible as the
+            // window's contents shifting by 1px on every configure
+            // ("wabern"). Forcing the draw guarantees a fresh buffer is
+            // attached in the same wl_surface.commit as the queued
+            // set_geometry / set_destination.
+            state.force_render_after_recovery = true;
             (state.bounds.size, state.scale)
         };
 
@@ -977,12 +1024,12 @@ impl WaylandWindowStatePtr {
             self.callbacks.borrow_mut().resize = Some(fun);
         }
 
+        // Defer viewport.set_destination to the next frame_callback so the
+        // logical destination commits atomically with the freshly rendered
+        // buffer of the same size (see pending_viewport_dest doc comment).
         {
-            let state = self.state.borrow();
-            if let Some(viewport) = &state.viewport {
-                viewport
-                    .set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
-            }
+            let mut state = self.state.borrow_mut();
+            state.pending_viewport_dest = Some(size);
         }
     }
 
@@ -1388,6 +1435,30 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
+
+        // Apply pending wgpu surface re-configure and viewport destination
+        // here — RIGHT BEFORE renderer.draw(scene) — so they always commit
+        // together with a fresh buffer of the matching size. Doing this in
+        // frame() (the wayland frame_callback handler) leaks them into
+        // commits where no draw runs this tick (gpui only draws when its
+        // invalidator is dirty, and the bounds_changed -> set_dirty path
+        // is async via on_resize, so it can miss the first frame_callback
+        // after a configure event). The unconditional surface.commit() in
+        // completed_frame() would then attach those state changes to the
+        // previous buffer, leaving Mutter to scale that stale buffer onto
+        // the new viewport — visible as a persistent 1px wabbern during
+        // interactive resizes.
+        if let Some(drawable) = state.pending_drawable_size.take() {
+            state.renderer.update_drawable_size(drawable);
+        }
+        if let Some(dest) = state.pending_viewport_dest.take() {
+            if let Some(viewport) = state.viewport.as_ref() {
+                viewport.set_destination(
+                    f32::from(dest.width) as i32,
+                    f32::from(dest.height) as i32,
+                );
+            }
+        }
 
         if state.renderer.device_lost() {
             let raw_window = RawWindow {
