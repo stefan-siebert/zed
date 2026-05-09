@@ -9,6 +9,8 @@ extern crate self as gpui;
 pub static GPUI_MANIFEST_DIR: &'static str = env!("CARGO_MANIFEST_DIR");
 #[macro_use]
 mod action;
+#[cfg(feature = "accessibility")]
+pub mod accessibility;
 mod app;
 
 mod arena;

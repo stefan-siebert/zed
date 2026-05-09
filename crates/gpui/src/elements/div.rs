@@ -706,6 +706,42 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Set the assistive-technology label for this element.
+    ///
+    /// The label is what VoiceOver / Narrator / Orca speak when the element is
+    /// focused. Setting any accessibility property implicitly opts this element
+    /// into the accessibility tree; pure layout containers should leave them
+    /// unset and remain invisible to AT.
+    #[cfg(feature = "accessibility")]
+    fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.interactivity().accessibility.label = Some(label.into());
+        self
+    }
+
+    /// Set the AccessKit role for this element (Button, Link, Checkbox, …).
+    /// Most callers should not need this directly: higher-level UI components
+    /// (gpui-component) set the role for their primitives.
+    #[cfg(feature = "accessibility")]
+    fn accessibility_role(mut self, role: crate::accessibility::Role) -> Self {
+        self.interactivity().accessibility.role = Some(role);
+        self
+    }
+
+    /// Set an extended description, spoken after the label.
+    #[cfg(feature = "accessibility")]
+    fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.interactivity().accessibility.description = Some(description.into());
+        self
+    }
+
+    /// Hide this subtree from assistive technology. Equivalent to
+    /// `aria-hidden="true"` — only use for purely decorative content.
+    #[cfg(feature = "accessibility")]
+    fn accessibility_hidden(mut self) -> Self {
+        self.interactivity().accessibility.hidden = true;
+        self
+    }
+
     /// Set whether this element is a tab stop.
     ///
     /// When false, the element remains in tab-index order but cannot be reached via keyboard navigation.
@@ -1726,6 +1762,9 @@ pub struct Interactivity {
     pub(crate) tab_group: bool,
     pub(crate) tab_stop: bool,
 
+    #[cfg(feature = "accessibility")]
+    pub(crate) accessibility: crate::accessibility::AccessibilityMetadata,
+
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
 
@@ -1734,6 +1773,32 @@ pub struct Interactivity {
 }
 
 impl Interactivity {
+    /// Push this element's accessibility metadata into the window's
+    /// sidecar tree. Called from `paint` after the element's bounds are
+    /// known. No-op if no accessibility properties were set.
+    #[cfg(feature = "accessibility")]
+    fn publish_accessibility(&self, bounds: Bounds<Pixels>, window: &Window) {
+        if self.accessibility.role.is_none()
+            && self.accessibility.label.is_none()
+            && self.accessibility.description.is_none()
+            && !self.accessibility.hidden
+        {
+            return;
+        }
+        let metadata = self.accessibility.clone();
+        let tree_handle = window.accessibility_tree();
+        let mut tree = tree_handle.lock();
+        if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
+            tree.attach_focus(focus_handle.id, metadata, bounds);
+        } else if let Some(element_id) = self.element_id.as_ref() {
+            tree.attach_element(element_id, metadata, bounds);
+        }
+        // Elements with neither focus handle nor element id and only
+        // accessibility metadata are silently dropped — they have no
+        // stable identity to address from the OS side. This is intentional
+        // and surfaced to authors via documentation, not a runtime warning.
+    }
+
     /// Layout this element according to this interactivity state's configured styles
     pub fn request_layout(
         &mut self,
@@ -2017,6 +2082,9 @@ impl Interactivity {
                 if style.visibility == Visibility::Hidden {
                     return ((), element_state);
                 }
+
+                #[cfg(feature = "accessibility")]
+                self.publish_accessibility(bounds, window);
 
                 let mut tab_group = None;
                 if self.tab_group {

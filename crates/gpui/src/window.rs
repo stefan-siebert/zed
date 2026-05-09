@@ -988,6 +988,17 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    /// Behind `Arc<Mutex<…>>` because OS accessibility callbacks (NSAccessibility,
+    /// UIA, AT-SPI) are invoked synchronously from the platform thread and must
+    /// be answered without going through GPUI's `App` borrow. Paint writes under
+    /// lock; OS callbacks read under lock. Action requests originating from the
+    /// OS *are* marshaled through the regular event queue, so they don't pass
+    /// through this lock.
+    #[cfg(feature = "accessibility")]
+    pub(crate) accessibility_tree: Arc<parking_lot::Mutex<crate::accessibility::AccessibilityTree>>,
+    #[cfg(feature = "accessibility")]
+    pub(crate) accessibility_adapter:
+        Option<Box<dyn crate::accessibility::PlatformAccessibilityAdapter>>,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1599,6 +1610,12 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            #[cfg(feature = "accessibility")]
+            accessibility_tree: Arc::new(parking_lot::Mutex::new(
+                crate::accessibility::AccessibilityTree::new(),
+            )),
+            #[cfg(feature = "accessibility")]
+            accessibility_adapter: None,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -1845,6 +1862,31 @@ impl Window {
     /// Accessor for the text system.
     pub fn text_system(&self) -> &Arc<WindowTextSystem> {
         &self.text_system
+    }
+
+    /// Returns a clone of the shared accessibility sidecar handle.
+    ///
+    /// Element implementations call this from `paint` and lock briefly to
+    /// publish their metadata. The platform adapter clones the same handle
+    /// at construction time and locks it from OS-side accessibility query
+    /// callbacks running on the platform thread. The lock contract is:
+    /// short, non-reentrant critical sections only — no GPUI `App` borrow
+    /// or `Window` mutation while held.
+    #[cfg(feature = "accessibility")]
+    pub fn accessibility_tree(
+        &self,
+    ) -> Arc<parking_lot::Mutex<crate::accessibility::AccessibilityTree>> {
+        self.accessibility_tree.clone()
+    }
+
+    /// Install the platform-specific accessibility adapter. Called once by
+    /// the platform window during construction (e.g. `gpui_macos::MacWindow`).
+    #[cfg(feature = "accessibility")]
+    pub fn install_accessibility_adapter(
+        &mut self,
+        adapter: Box<dyn crate::accessibility::PlatformAccessibilityAdapter>,
+    ) {
+        self.accessibility_adapter = Some(adapter);
     }
 
     /// The current text style. Which is composed of all the style refinements provided to `with_text_style`.
@@ -2522,6 +2564,9 @@ impl Window {
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
         self.requested_autoscroll = None;
+
+        #[cfg(feature = "accessibility")]
+        self.accessibility_tree.lock().begin_frame();
 
         // Restore the previously-used input handler.
         if let Some(input_handler) = self.platform_window.take_input_handler() {

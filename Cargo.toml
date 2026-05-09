@@ -501,6 +501,12 @@ aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
 any_vec = "0.14"
 anyhow = "1.0.86"
+# Accessibility (AccessKit) — Phase 1 for App Store compliance.
+# Kept as workspace deps so feature-gated activation in gpui/gpui_macos/etc. lines up on a single version.
+accesskit = "0.16"
+accesskit_macos = "0.18"
+accesskit_windows = "0.24"
+accesskit_unix = { version = "0.13", default-features = false, features = ["async-io"] }
 ashpd = { version = "0.13", default-features = false, features = [
     "async-io",
     "notification",
