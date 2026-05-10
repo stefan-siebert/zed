@@ -637,6 +637,19 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn capslock(&self) -> Capslock;
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler);
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler>;
+
+    /// Hand the platform window a clone of the GPUI Window's accessibility
+    /// sidecar so the platform-specific adapter (NSAccessibility / UIA /
+    /// AT-SPI) can read snapshots from it on OS callbacks. Default impl is
+    /// a no-op for platforms that have no AT integration yet.
+    #[cfg(feature = "accessibility")]
+    fn attach_accessibility_tree(
+        &mut self,
+        _tree: std::sync::Arc<
+            parking_lot::Mutex<crate::accessibility::AccessibilityTree>,
+        >,
+    ) {
+    }
     fn prompt(
         &self,
         level: PromptLevel,

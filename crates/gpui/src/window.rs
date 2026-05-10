@@ -1587,6 +1587,15 @@ impl Window {
 
         platform_window.map_window()?;
 
+        #[cfg(feature = "accessibility")]
+        let accessibility_tree = {
+            let tree = Arc::new(parking_lot::Mutex::new(
+                crate::accessibility::AccessibilityTree::new(),
+            ));
+            platform_window.attach_accessibility_tree(tree.clone());
+            tree
+        };
+
         Ok(Window {
             handle,
             invalidator,
@@ -1611,9 +1620,7 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             #[cfg(feature = "accessibility")]
-            accessibility_tree: Arc::new(parking_lot::Mutex::new(
-                crate::accessibility::AccessibilityTree::new(),
-            )),
+            accessibility_tree,
             #[cfg(feature = "accessibility")]
             accessibility_adapter: None,
             next_frame_callbacks,
@@ -2628,6 +2635,12 @@ impl Window {
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
+
+        // Accessibility flush is the platform window's responsibility — it
+        // owns the OS adapter and runs the OS callbacks on the platform
+        // thread. macOS does this in `MacWindow::draw`. The
+        // `accessibility_adapter` slot on Window is reserved for platforms
+        // that need cross-platform-side flush hooks (Windows/Linux, later).
 
         ArenaClearNeeded::new(&cx.element_arena)
     }

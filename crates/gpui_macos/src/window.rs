@@ -285,6 +285,12 @@ unsafe fn build_classes() {
                     sel!(characterIndexForPoint:),
                     character_index_for_point as extern "C" fn(&Object, Sel, NSPoint) -> u64,
                 );
+
+                // NSAccessibility selectors (accessibilityChildren, accessibilityHitTest:,
+                // accessibilityFocusedUIElement, isAccessibilityElement) are NOT registered
+                // here. `accesskit_macos::SubclassingAdapter` dynamically subclasses GPUIView
+                // when the GPUI runtime calls `attach_accessibility_tree`, and registers
+                // those selectors on the subclass. See `crate::accessibility::MacAccessibility`.
             }
             decl.register()
         };
@@ -451,6 +457,8 @@ struct MacWindowState {
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
     fullscreen_restore_bounds: Bounds<Pixels>,
+    #[cfg(feature = "accessibility")]
+    accessibility: Option<crate::accessibility::MacAccessibility>,
     move_tab_to_new_window_callback: Option<Box<dyn FnMut()>>,
     merge_all_windows_callback: Option<Box<dyn FnMut()>>,
     select_next_tab_callback: Option<Box<dyn FnMut()>>,
@@ -777,6 +785,8 @@ impl MacWindow {
                 external_files_dragged: false,
                 first_mouse: false,
                 fullscreen_restore_bounds: Bounds::default(),
+                #[cfg(feature = "accessibility")]
+                accessibility: None,
                 move_tab_to_new_window_callback: None,
                 merge_all_windows_callback: None,
                 select_next_tab_callback: None,
@@ -820,6 +830,10 @@ impl MacWindow {
 
             native_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable);
             native_view.setWantsBestResolutionOpenGLSurface_(YES);
+
+            // The accessibility adapter is constructed lazily, when the GPUI
+            // runtime calls `attach_accessibility_tree` on this window — see
+            // the `PlatformWindow` impl below.
 
             // From winit crate: On Mojave, views automatically become layer-backed shortly after
             // being added to a native_window. Changing the layer-backedness of a view breaks the
@@ -1216,6 +1230,84 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().input_handler.take()
     }
 
+    #[cfg(feature = "accessibility")]
+    fn attach_accessibility_tree(
+        &mut self,
+        tree: std::sync::Arc<parking_lot::Mutex<gpui::accessibility::AccessibilityTree>>,
+    ) {
+        use accesskit::{Action, ActionRequest};
+        use gpui::accessibility::AccessibilityTree;
+        use std::sync::{Arc, Weak};
+
+        let weak_state: Weak<Mutex<MacWindowState>> = Arc::downgrade(&self.0);
+        let tree_for_dispatch: Arc<Mutex<AccessibilityTree>> = tree.clone();
+
+        // Dispatch closure for OS-originated ActionRequests. Runs on the
+        // AppKit main thread (per accesskit_macos contract). Hybrid policy:
+        // Click → synthetic MouseDown+MouseUp at hitbox center; everything
+        // else → direct API or logged TODO until bridged.
+        let dispatch: Arc<dyn Fn(ActionRequest) + Send + Sync> =
+            Arc::new(move |request: ActionRequest| {
+                let target_bounds = tree_for_dispatch.lock().bounds_for(request.target);
+                let Some(state_arc) = weak_state.upgrade() else {
+                    return;
+                };
+
+                match request.action {
+                    Action::Click => {
+                        let Some(bounds) = target_bounds else {
+                            log::debug!(
+                                "accessibility Click on {:?} dropped: no bounds recorded",
+                                request.target,
+                            );
+                            return;
+                        };
+                        let position = bounds.center();
+                        let down = MouseDownEvent {
+                            button: MouseButton::Left,
+                            position,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        };
+                        let up = MouseUpEvent {
+                            button: MouseButton::Left,
+                            position,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                        };
+                        let mut state = state_arc.lock();
+                        if let Some(callback) = state.event_callback.as_mut() {
+                            callback(PlatformInput::MouseDown(down));
+                            callback(PlatformInput::MouseUp(up));
+                        }
+                    }
+                    // Focus, ScrollIntoView, Increment/Decrement, SetValue,
+                    // ShowContextMenu need a bridge into GPUI's window-level
+                    // APIs (focus map, scroll handles, action dispatch).
+                    // Wire-up follows in a separate commit; logging here so
+                    // a misbehaving AT client doesn't crash silently.
+                    other => {
+                        log::debug!(
+                            "accessibility action {:?} not yet bridged (target: {:?})",
+                            other,
+                            request.target,
+                        );
+                    }
+                }
+            });
+
+        let native_view = self.0.as_ref().lock().native_view.as_ptr() as id;
+        // SAFETY: native_view is the GPUIView NSView allocated in MacWindow::open
+        // and retained for the lifetime of MacWindowState. The adapter holds
+        // a weak NSView reference internally and only dereferences on the
+        // main thread.
+        let access = unsafe {
+            crate::accessibility::MacAccessibility::new(native_view, tree, dispatch)
+        };
+        self.0.as_ref().lock().accessibility = Some(access);
+    }
+
     fn prompt(
         &self,
         level: PromptLevel,
@@ -1600,6 +1692,11 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
+        #[cfg(feature = "accessibility")]
+        if let Some(access) = this.accessibility.as_ref() {
+            use gpui::accessibility::PlatformAccessibilityAdapter;
+            access.flush();
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
