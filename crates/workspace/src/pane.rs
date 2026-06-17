@@ -21,8 +21,8 @@ use gpui::{
     Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
     Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, WeakEntity, WeakFocusHandle, Window, actions, anchored,
-    deferred, prelude::*,
+    ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
+    anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -2486,13 +2486,29 @@ impl Pane {
                             pane.remove_item(item.item_id(), false, false, window, cx);
                         }
 
-                        item.save_as(project, new_path, window, cx)
+                        item.save_as(project.clone(), new_path, window, cx)
                     })?
                 } else {
                     return Ok(false);
                 };
 
                 save_task.await?;
+                if should_format {
+                    pane.update_in(cx, |pane, window, cx| {
+                        pane.unpreview_item_if_preview(item.item_id());
+                        item.save(
+                            SaveOptions {
+                                format: true,
+                                autosave: false,
+                                force_format,
+                            },
+                            project,
+                            window,
+                            cx,
+                        )
+                    })?
+                    .await?;
+                }
                 return Ok(true);
             }
         }
@@ -2778,6 +2794,8 @@ impl Pane {
                 selected: is_active,
                 preview: is_preview,
                 deemphasized: !self.has_focus(window, cx),
+                max_title_len: None,
+                truncate_title_middle: false,
             },
             window,
             cx,
@@ -3614,7 +3632,7 @@ impl Pane {
             .id("tab_bar_drop_target")
             .min_w_6()
             .h(Tab::container_height(cx))
-            .flex_grow()
+            .flex_grow_1()
             // HACK: This empty child is currently necessary to force the drop target to appear
             // despite us setting a min width above.
             .child("")
@@ -3658,7 +3676,7 @@ impl Pane {
             .debug_selector(|| "pinned_tabs_border".into())
             .min_w_6()
             .h(Tab::container_height(cx))
-            .flex_grow()
+            .flex_grow_1()
             .border_l_1()
             .border_color(cx.theme().colors().border)
             // HACK: This empty child is currently necessary to force the drop target to appear
@@ -4040,10 +4058,7 @@ impl Pane {
             .workspace
             .update(cx, |workspace, cx| {
                 if workspace.project().read(cx).is_via_collab() {
-                    workspace.show_error(
-                        &anyhow::anyhow!("Cannot drop files on a remote project"),
-                        cx,
-                    );
+                    workspace.show_error("Cannot drop files on a remote project", cx);
                     true
                 } else {
                     false
@@ -4099,7 +4114,7 @@ impl Pane {
                         _ = workspace.update_in(cx, |workspace, window, cx| {
                             for item in opened_items.into_iter().flatten() {
                                 if let Err(e) = item {
-                                    workspace.show_error(&e, cx);
+                                    workspace.show_error(format!("Error: {e}"), cx);
                                 }
                             }
                             if to_pane.read(cx).items_len() == 0 {
@@ -4914,6 +4929,8 @@ impl Render for DraggedTab {
                 selected: false,
                 preview: false,
                 deemphasized: false,
+                max_title_len: None,
+                truncate_title_middle: false,
             },
             window,
             cx,
@@ -8021,6 +8038,74 @@ mod tests {
             assert!(
                 !item.is_dirty,
                 "item should no longer be dirty after reload"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_format_runs_on_first_save_of_new_file(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let item = add_labeled_item(&pane, "untitled", true, cx);
+        item.update(cx, |item, cx| {
+            item.project_items.push(TestProjectItem::new_untitled(cx));
+        });
+        assert_item_labels(&pane, ["untitled*^"], cx);
+
+        let close_task = pane.update_in(cx, |pane, window, cx| {
+            pane.close_item_by_id(item.item_id(), SaveIntent::Save, window, cx)
+        });
+
+        cx.executor().run_until_parked();
+        cx.simulate_new_path_selection(|_| Some(Default::default()));
+        close_task.await.unwrap();
+
+        item.read_with(cx, |item, _| {
+            assert_eq!(item.save_as_count, 1);
+            assert_eq!(
+                item.save_count, 1,
+                "formatter should run after the file is given a path on first save"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_format_does_not_run_on_first_save_when_save_without_format(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let item = add_labeled_item(&pane, "untitled", true, cx);
+        item.update(cx, |item, cx| {
+            item.project_items.push(TestProjectItem::new_untitled(cx));
+        });
+        assert_item_labels(&pane, ["untitled*^"], cx);
+
+        let close_task = pane.update_in(cx, |pane, window, cx| {
+            pane.close_item_by_id(item.item_id(), SaveIntent::SaveWithoutFormat, window, cx)
+        });
+
+        cx.executor().run_until_parked();
+        cx.simulate_new_path_selection(|_| Some(Default::default()));
+        close_task.await.unwrap();
+
+        item.read_with(cx, |item, _| {
+            assert_eq!(item.save_as_count, 1);
+            assert_eq!(
+                item.save_count, 0,
+                "formatter should not run when SaveWithoutFormat is used"
             );
         });
     }
