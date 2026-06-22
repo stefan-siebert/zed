@@ -3823,6 +3823,7 @@ impl Window {
                 bounds: bounds.scale(scale_factor),
                 content_mask: content_mask.scale(scale_factor),
                 params,
+                _pad: [0.0; 2],
             });
     }
 

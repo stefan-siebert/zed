@@ -1630,6 +1630,7 @@ struct CustomShaderInstance {{
     bounds: Bounds,
     content_mask: Bounds,
     params: array<f32, 16>,
+    pad: vec2<f32>,
 }}
 @group(1) @binding(0) var<storage, read> b_instances: array<CustomShaderInstance>;
 

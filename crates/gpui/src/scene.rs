@@ -53,6 +53,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.custom_shaders.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -800,6 +801,13 @@ pub struct CustomShaderInstance {
     pub content_mask: ContentMask<ScaledPixels>,
     /// 16 user-defined float parameters passed to the fragment shader.
     pub params: [f32; 16],
+    /// Padding so the instance size is a multiple of 16 bytes (112). The
+    /// DirectX backend exposes per-batch sub-ranges of the instance buffer as a
+    /// raw `ByteAddressBuffer` SRV, whose `FirstElement` must be 4-word/16-byte
+    /// aligned; a 28-word (112-byte) stride guarantees every instance offset is
+    /// aligned. The WGSL templates carry a matching `pad` field. Not exposed to
+    /// `custom_effect`.
+    pub _pad: [f32; 2],
 }
 
 impl From<CustomShaderInstance> for Primitive {
