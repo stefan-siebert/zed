@@ -48,8 +48,24 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 | `c31d1826` | DirectX runtime for custom shaders (Windows) |
 | `f4828a22` | Restore `CustomShaders` arm in macOS metal renderer match |
 | `7b4ffb22` | Fix Point/Size field access in vignette & shimmer effects |
+| `ec534b9e` | Custom-shader instances: clear per frame + 16-byte instance stride |
 
 New/large files: `gpui_windows/src/directx_custom_shader.rs` (+419), `gpui_wgpu/src/wgpu_renderer.rs` (+464), `shaders.wgsl`, `shaders.metal`.
+
+**`ec534b9e` — two bugs surfaced by the first heavy real use of custom shaders**
+(Elane's disk-usage treemap, which emits hundreds of custom-shader quads per
+frame). Both must survive upstream merges:
+1. `Scene::clear()` cleared every primitive vec except `custom_shaders`, so
+   instances accumulated every frame until the instance buffer overflowed
+   (`E_INVALIDARG`, "scene too large", custom count growing without bound).
+2. The DirectX backend exposes each per-batch sub-range of the instance buffer
+   as a raw `ByteAddressBuffer` SRV whose `FirstElement` must be 4-word/16-byte
+   aligned. `CustomShaderInstance` was 104 bytes (26 words), so a batch starting
+   at an odd instance offset (draw-order interleaving with text splits one run
+   into sub-batches at arbitrary offsets) made `FirstElement` unaligned and
+   `CreateShaderResourceView` failed. Padded the instance to 112 bytes (28
+   words); matching `pad: vec2<f32>` added to the DirectX + wgpu WGSL templates.
+   `custom_effect` still receives `params: array<f32,16>` unchanged.
 
 ## 3. Screenshot / render-to-image (inspector & screenshots)
 
