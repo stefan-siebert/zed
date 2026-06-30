@@ -1977,7 +1977,8 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
             gamma_ratios: self.rendering_params.gamma_ratios,
             grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
             subpixel_enhanced_contrast: self.rendering_params.subpixel_enhanced_contrast,
-            _pad: [0.0; 2],
+            is_bgr: self.is_bgr as u32,
+            _pad: 0,
         };
 
         {
