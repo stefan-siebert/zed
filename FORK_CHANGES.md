@@ -22,7 +22,7 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 
 ## Summary
 
-**30 custom commits**, net **+3,537 / −186 lines across 43 files** vs the upstream merge point.
+**36 custom commits**, net **+3,537 / −186 lines across 43 files** vs the upstream merge point.
 
 ⚠️ These forks are load-bearing (see Elane `CLAUDE.md`). `cargo update` against upstream will break the shader, inspector, drag, and clipboard work.
 
@@ -121,7 +121,13 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 |---|---|
 | `6c686147` | Respect animated WebP loop count instead of looping forever |
 
-## 10. Docs
+## 10. Text system performance
+
+| Commit | Change |
+|---|---|
+| `93a1d339` | Cache font-resolution failures as `Arc<anyhow::Error>` — cache hits for a missing family no longer construct a fresh anyhow error (= backtrace capture when `RUST_BACKTRACE` is set) per text line per frame |
+
+## 11. Docs
 
 | Commit | Change |
 |---|---|
