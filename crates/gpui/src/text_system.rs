@@ -16,7 +16,7 @@ use crate::{
     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
     StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
-use anyhow::{Context as _, anyhow};
+use anyhow::Context as _;
 use collections::FxHashMap;
 use core::fmt;
 use derive_more::{Add, Deref, FromStr, Sub};
@@ -50,7 +50,11 @@ pub const SUBPIXEL_VARIANTS_Y: u8 = 1;
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
-    font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId>>>,
+    // The error arm is Arc'd so cache hits for a missing font (e.g. a family
+    // that isn't installed) stay allocation-free: rebuilding an anyhow::Error
+    // per lookup captures a backtrace each time when RUST_BACKTRACE is on,
+    // which burned most of a frame during per-line font resolution.
+    font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId, Arc<anyhow::Error>>>>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
@@ -104,26 +108,18 @@ impl TextSystem {
     }
 
     /// Get the FontId for the configure font family and style.
-    fn font_id(&self, font: &Font) -> Result<FontId> {
-        fn clone_font_id_result(font_id: &Result<FontId>) -> Result<FontId> {
-            match font_id {
-                Ok(font_id) => Ok(*font_id),
-                Err(err) => Err(anyhow!("{err}")),
-            }
-        }
-
-        let font_id = self
-            .font_ids_by_font
-            .read()
-            .get(font)
-            .map(clone_font_id_result);
-        if let Some(font_id) = font_id {
+    fn font_id(&self, font: &Font) -> Result<FontId, Arc<anyhow::Error>> {
+        let cached = self.font_ids_by_font.read().get(font).cloned();
+        if let Some(font_id) = cached {
             font_id
         } else {
-            let font_id = self.platform_text_system.font_id(font);
+            let font_id = self
+                .platform_text_system
+                .font_id(font)
+                .map_err(Arc::new);
             self.font_ids_by_font
                 .write()
-                .insert(font.clone(), clone_font_id_result(&font_id));
+                .insert(font.clone(), font_id.clone());
             font_id
         }
     }
