@@ -240,6 +240,41 @@ impl TaffyLayoutEngine {
                 },
             )
             .expect(EXPECT_MESSAGE);
+
+        // Layout debugging aid: set GPUI_LAYOUT_DEBUG=1 to dump every solved
+        // taffy tree (per-node style + computed layout) to stderr. The dump
+        // can be replayed against a standalone taffy crate to bisect
+        // engine-level layout bugs (used to root-cause the taffy 0.10
+        // percent-width collapse fixed by the 0.12 bump).
+        if std::env::var_os("GPUI_LAYOUT_DEBUG").is_some() {
+            eprintln!(
+                "=== compute_layout root {:?} available {:?} scale {scale_factor} ===",
+                u64::from(taffy::NodeId::from(id)),
+                available_space
+            );
+            self.debug_dump(id, 0);
+        }
+    }
+
+    /// See the `GPUI_LAYOUT_DEBUG` note in [`Self::compute_layout`].
+    fn debug_dump(&self, id: LayoutId, depth: usize) {
+        let node = taffy::NodeId::from(id);
+        let style = self.taffy.style(node).expect(EXPECT_MESSAGE);
+        let layout = self.taffy.layout(node).expect(EXPECT_MESSAGE);
+        eprintln!(
+            "{:indent$}#{} -> {}x{} @({},{}) STYLE {:?}",
+            "",
+            u64::from(node),
+            layout.size.width,
+            layout.size.height,
+            layout.location.x,
+            layout.location.y,
+            style,
+            indent = depth * 2
+        );
+        for child in self.taffy.children(node).expect(EXPECT_MESSAGE) {
+            self.debug_dump(LayoutId::from(child), depth + 1);
+        }
     }
 
     // Pixel snapping
@@ -746,6 +781,128 @@ mod tests {
         assert_eq!(
             taffy_border.left,
             taffy::style::LengthPercentage::length(2.0)
+        );
+    }
+
+    /// Regression guard for a taffy 0.10/0.11 layout bug (fixed in 0.12):
+    /// inside a Block container that is itself an auto-sized flex item, a
+    /// flex-column's percent-width child collapsed to width 0 whenever a
+    /// sibling subtree contained flex items with a pixel `flex_basis`.
+    ///
+    /// This is the tree GPUI produces for "flex-col window root -> plain div
+    /// wrapper -> [splitter row with px-basis panels, fixed-height w_full
+    /// bottom panel]" — Elane's embedded terminal collapsed to one column
+    /// because of it. If this test fails after a `taffy` version change
+    /// (e.g. an upstream merge pinning `=0.10.1` again), do NOT downgrade
+    /// below 0.12.
+    #[test]
+    fn percent_width_child_in_block_wrapped_flex_column() {
+        use taffy::prelude::*;
+
+        let mut tree: taffy::TaffyTree<()> = taffy::TaffyTree::new();
+        tree.disable_rounding();
+
+        let percent_full = taffy::geometry::Size {
+            width: taffy::style::Dimension::percent(1.0),
+            height: taffy::style::Dimension::percent(1.0),
+        };
+
+        // Two panels with a pixel flex_basis (like measured resizable panels).
+        let panel_style = taffy::style::Style {
+            display: taffy::style::Display::Flex,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            flex_basis: taffy::style::Dimension::length(609.0),
+            size: taffy::geometry::Size {
+                width: taffy::style::Dimension::auto(),
+                height: taffy::style::Dimension::percent(1.0),
+            },
+            ..Default::default()
+        };
+        let panel_a = tree.new_leaf(panel_style.clone()).unwrap();
+        let panel_b = tree.new_leaf(panel_style).unwrap();
+
+        let row = tree
+            .new_with_children(
+                taffy::style::Style {
+                    display: taffy::style::Display::Flex,
+                    flex_direction: taffy::style::FlexDirection::Row,
+                    size: percent_full,
+                    ..Default::default()
+                },
+                &[panel_a, panel_b],
+            )
+            .unwrap();
+
+        // Bottom panel: width 100%, fixed height — the collapsing node.
+        let bottom = tree
+            .new_with_children(
+                taffy::style::Style {
+                    display: taffy::style::Display::Flex,
+                    flex_direction: taffy::style::FlexDirection::Column,
+                    size: taffy::geometry::Size {
+                        width: taffy::style::Dimension::percent(1.0),
+                        height: taffy::style::Dimension::length(375.0),
+                    },
+                    ..Default::default()
+                },
+                &[],
+            )
+            .unwrap();
+
+        let outer = tree
+            .new_with_children(
+                taffy::style::Style {
+                    display: taffy::style::Display::Flex,
+                    flex_direction: taffy::style::FlexDirection::Column,
+                    size: percent_full,
+                    ..Default::default()
+                },
+                &[row, bottom],
+            )
+            .unwrap();
+
+        // Plain-div wrapper: display Block (gpui's div() default), auto size,
+        // stretched as a flex item of the window root.
+        let block_wrapper = tree
+            .new_with_children(
+                taffy::style::Style {
+                    display: taffy::style::Display::Block,
+                    flex_grow: 1.0,
+                    flex_shrink: 1.0,
+                    flex_basis: taffy::style::Dimension::percent(0.0),
+                    ..Default::default()
+                },
+                &[outer],
+            )
+            .unwrap();
+
+        let root = tree
+            .new_with_children(
+                taffy::style::Style {
+                    display: taffy::style::Display::Flex,
+                    flex_direction: taffy::style::FlexDirection::Column,
+                    size: percent_full,
+                    ..Default::default()
+                },
+                &[block_wrapper],
+            )
+            .unwrap();
+
+        tree.compute_layout(
+            root,
+            taffy::geometry::Size {
+                width: taffy::style::AvailableSpace::Definite(1250.0),
+                height: taffy::style::AvailableSpace::Definite(875.0),
+            },
+        )
+        .unwrap();
+
+        let bottom_layout = tree.layout(bottom).unwrap();
+        assert_eq!(
+            bottom_layout.size.width, 1250.0,
+            "percent-width bottom panel must span its parent, got {:?}",
+            bottom_layout.size
         );
     }
 }
