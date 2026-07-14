@@ -1479,9 +1479,15 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
             move |request_frame_options| {
+                // These updates fail ("RefCell already borrowed") when the
+                // platform delivers the frame message re-entrantly while the
+                // App is borrowed — i.e. something inside an update pumped
+                // the message queue. The failure stack names that something,
+                // so capture it (backtrace only materializes on error, and
+                // only with RUST_BACKTRACE/RUST_LIB_BACKTRACE set).
                 let thermal_state = handle
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
-                    .log_err();
+                    .log_err_with_backtrace();
 
                 // Throttle frame rate based on conditions:
                 // - Thermal pressure (Serious/Critical): cap to ~60fps
@@ -1547,19 +1553,19 @@ impl Window {
                                 window.present();
                                 arena_clear_needed.clear();
                             })
-                            .log_err();
+                            .log_err_with_backtrace();
                     })
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
-                        .log_err();
+                        .log_err_with_backtrace();
                 }
 
                 handle
                     .update(&mut cx, |_, window, _| {
                         window.complete_frame();
                     })
-                    .log_err();
+                    .log_err_with_backtrace();
             }
         }));
         platform_window.on_resize(Box::new({
@@ -1637,18 +1643,29 @@ impl Window {
         });
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
+            // WM_NCHITTEST (and friends) arrive synchronously whenever the
+            // platform wants the area under the cursor — including re-entrantly
+            // while the App RefCell is already borrowed (input dispatch, draw;
+            // easy to hit with continuously-animating content like video).
+            // The cursor cannot have moved within such a re-entrant call, so
+            // answering from the last successful hit test is exact — logging
+            // a "RefCell already borrowed" error every time would be noise.
+            let last_hit = std::cell::Cell::new(None);
             Box::new(move || {
-                handle
-                    .update(&mut cx, |_, window, _cx| {
-                        for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
-                            if window.mouse_hit_test.ids.contains(&hitbox.id) {
-                                return Some(*area);
-                            }
+                match handle.update(&mut cx, |_, window, _cx| {
+                    for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
+                        if window.mouse_hit_test.ids.contains(&hitbox.id) {
+                            return Some(*area);
                         }
-                        None
-                    })
-                    .log_err()
-                    .unwrap_or(None)
+                    }
+                    None
+                }) {
+                    Ok(area) => {
+                        last_hit.set(area);
+                        area
+                    }
+                    Err(_) => last_hit.get(),
+                }
             })
         });
         platform_window.on_move_tab_to_new_window({

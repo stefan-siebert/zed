@@ -146,6 +146,12 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 |---|---|
 | `ff0a013d78` + `1619958422` | **Windows zero-copy video presentation** (counterpart of §12). New `gpui::D3d11Frame` type (`gpui/src/d3d11_surface.rs`: NT shared handle + keyed-mutex keys + owner keepalive) + `SurfaceSource::D3d11` arm, Windows `surface()`/`Window::paint_surface`, platform-neutral `Window::supports_video_surfaces()` (macOS true / Linux dmabuf check / Windows `PlatformWindow::supports_d3d11_surfaces`). `gpui_windows`: the previously stubbed `draw_surfaces` now opens producer textures via `ID3D11Device1::OpenSharedResource1` (cached by handle value, cleared on device loss), synchronizes through `IDXGIKeyedMutex` (AcquireSync via **vtable** — windows-rs folds WAIT_TIMEOUT into `Ok(())`; timeout = skip frame, never stall), and draws through a new `surface` HLSL module (unit quad sampling the BGRA texture, content-mask clipped; `SurfaceSprite` instance pipeline; module added to build.rs fxc list). Producer protocol: acquire 0-first-then-1, release to 1; consumers acquire/release 1 so paused frames stay re-acquirable across redraws. Consumer: Elane's video preview (elane-media `windows_mf.rs`). |
 
+## 12c. Re-entrant window-message diagnostics (Windows)
+
+| Commit | Change |
+|---|---|
+| (pending) | **`on_hit_test_window_control`: answer re-entrant hit tests from a cache instead of erroring.** WM_NCHITTEST arrives synchronously while the App RefCell may already be borrowed (input dispatch, draw — easy to hit with continuously-animating content like video). The cursor cannot have moved within the re-entrant call, so the last successful answer is exact; previously this logged "RefCell already borrowed" and degraded the hit test to `None`. Additionally the `request_frame` callback's updates now use `log_err_with_backtrace()` — when the frame message is delivered re-entrantly, the failure stack names whoever pumped the message queue (backtrace materializes only on error and only with `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE` set; Elane arms `RUST_LIB_BACKTRACE` when debug logging is on). |
+
 ## 13. Docs
 
 | Commit | Change |
