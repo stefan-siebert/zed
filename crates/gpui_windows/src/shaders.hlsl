@@ -1256,3 +1256,40 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              Video surfaces (shared D3D11 textures)
+**
+*/
+
+struct SurfaceSprite {
+    Bounds bounds;
+    Bounds content_mask;
+};
+
+StructuredBuffer<SurfaceSprite> surface_sprites: register(t1);
+
+struct SurfaceVertexOutput {
+    float4 position: SV_Position;
+    float2 texcoord: TEXCOORD0;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+SurfaceVertexOutput surface_vertex(uint vertex_id: SV_VertexID, uint sprite_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    SurfaceSprite sprite = surface_sprites[sprite_id];
+
+    SurfaceVertexOutput output;
+    output.position = to_device_position(unit_vertex, sprite.bounds);
+    output.texcoord = unit_vertex;
+    output.clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    return output;
+}
+
+float4 surface_fragment(SurfaceVertexOutput input): SV_Target {
+    // BGRA video content is opaque; the producer already colour-converted.
+    float4 color = t_sprite.Sample(s_sprite, input.texcoord);
+    color.a = 1.0;
+    return color;
+}

@@ -976,6 +976,12 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().gpu_specs().log_err()
     }
 
+    fn supports_d3d11_surfaces(&self) -> bool {
+        // The DirectX renderer always presents on Windows; shared-texture
+        // import only needs a live device.
+        true
+    }
+
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let scale_factor = self.state.scale_factor.get();
         let caret_position = POINT {

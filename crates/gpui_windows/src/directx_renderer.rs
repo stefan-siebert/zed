@@ -45,6 +45,10 @@ pub(crate) struct DirectXRenderer {
     resources: Option<DirectXResources>,
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
+    /// Producer textures opened via their NT shared handles, cached by
+    /// handle value (video surfaces; see `draw_surfaces`). Cleared on device
+    /// loss — the imports are device-specific.
+    opened_surfaces: std::collections::HashMap<isize, OpenedSurface>,
     custom_shaders: CustomShaderResources,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
@@ -94,6 +98,24 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    surface_pipeline: PipelineState<SurfaceSprite>,
+}
+
+/// Instance data for one video surface (see `surface_vertex` in shaders.hlsl).
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SurfaceSprite {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+}
+
+/// A producer's shared texture opened on the renderer's device, cached by
+/// the NT handle value.
+struct OpenedSurface {
+    srv: Option<ID3D11ShaderResourceView>,
+    keyed_mutex: Option<IDXGIKeyedMutex>,
+    /// Keeps the producer's texture alive while the cache entry exists.
+    _owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
 }
 
 struct DirectXGlobalElements {
@@ -173,6 +195,7 @@ impl DirectXRenderer {
             resources: Some(resources),
             globals,
             pipelines,
+            opened_surfaces: std::collections::HashMap::new(),
             custom_shaders: CustomShaderResources::new(),
             direct_composition,
             font_info: Self::get_font_info(),
@@ -301,6 +324,8 @@ impl DirectXRenderer {
         self.resources = Some(resources);
         self.globals = globals;
         self.pipelines = pipelines;
+        // Shared-texture imports are device-specific; reopen on demand.
+        self.opened_surfaces.clear();
         self.custom_shaders.handle_device_lost();
         self.direct_composition = direct_composition;
         self.skip_draws = true;
@@ -827,6 +852,80 @@ impl DirectXRenderer {
         if surfaces.is_empty() {
             return Ok(());
         }
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+
+        // The cache only grows while distinct producers are alive; a video
+        // preview uses a small texture ring. Reset it when something leaks
+        // handles at us rather than growing unboundedly.
+        if self.opened_surfaces.len() > 32 {
+            self.opened_surfaces.clear();
+        }
+
+        for surface in surfaces {
+            let frame = &surface.frame;
+            let opened = match self.opened_surfaces.entry(frame.shared_handle) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    match open_shared_surface(&devices.device, frame) {
+                        Ok(opened) => entry.insert(opened),
+                        Err(err) => {
+                            log::debug!("video surface import failed, skipped: {err}");
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            // Synchronize with the producer. A timeout means the producer is
+            // mid-write — drop this frame rather than stalling the frame.
+            let acquired = match &opened.keyed_mutex {
+                Some(mutex) if frame.acquire_key != u64::MAX => {
+                    match acquire_keyed_mutex(mutex, frame.acquire_key, 16) {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            log::debug!("video surface mutex timeout, frame skipped");
+                            continue;
+                        }
+                        Err(err) => {
+                            log::debug!("video surface mutex failed, frame skipped: {err}");
+                            continue;
+                        }
+                    }
+                }
+                _ => false,
+            };
+
+            let sprite = SurfaceSprite {
+                bounds: surface.bounds,
+                content_mask: surface.content_mask.bounds,
+            };
+            let draw_result = self
+                .pipelines
+                .surface_pipeline
+                .update_buffer(
+                    &devices.device,
+                    &devices.device_context,
+                    slice::from_ref(&sprite),
+                )
+                .and_then(|()| {
+                    self.pipelines.surface_pipeline.draw_with_texture(
+                        &devices.device_context,
+                        slice::from_ref(&opened.srv),
+                        slice::from_ref(&resources.viewport),
+                        slice::from_ref(&self.globals.global_params_buffer),
+                        slice::from_ref(&self.globals.sampler),
+                        1,
+                    )
+                });
+
+            if acquired && let Some(mutex) = &opened.keyed_mutex {
+                unsafe {
+                    mutex.ReleaseSync(frame.release_key).ok();
+                }
+            }
+            draw_result?;
+        }
         Ok(())
     }
 
@@ -1064,6 +1163,13 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let surface_pipeline = PipelineState::new(
+            device,
+            "surface_pipeline",
+            ShaderModule::Surface,
+            4,
+            create_blend_state(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -1074,6 +1180,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            surface_pipeline,
         })
     }
 }
@@ -1730,6 +1837,45 @@ fn update_buffer<T>(
 }
 
 #[inline]
+/// Open a producer's shared texture (NT handle) on our device and build the
+/// SRV + keyed-mutex view for sampling it.
+fn open_shared_surface(device: &ID3D11Device, frame: &D3d11Frame) -> Result<OpenedSurface> {
+    use windows::Win32::Foundation::HANDLE;
+
+    let device1: ID3D11Device1 = device.cast()?;
+    let texture: ID3D11Texture2D =
+        unsafe { device1.OpenSharedResource1(HANDLE(frame.shared_handle as *mut _))? };
+    let mut srv: Option<ID3D11ShaderResourceView> = None;
+    unsafe {
+        device.CreateShaderResourceView(&texture, None, Some(&mut srv))?;
+    }
+    let keyed_mutex = texture.cast::<IDXGIKeyedMutex>().ok();
+    Ok(OpenedSurface {
+        srv,
+        keyed_mutex,
+        _owner: frame.owner.clone(),
+    })
+}
+
+/// `IDXGIKeyedMutex::AcquireSync` returns WAIT_TIMEOUT (0x102) as a
+/// *positive* HRESULT, which windows-rs folds into `Ok(())` — call through
+/// the vtable to keep the distinction. Ok(true) = acquired, Ok(false) =
+/// timeout.
+fn acquire_keyed_mutex(mutex: &IDXGIKeyedMutex, key: u64, timeout_ms: u32) -> Result<bool> {
+    use windows::Win32::Foundation::S_OK;
+
+    let hr = unsafe {
+        (Interface::vtable(mutex).AcquireSync)(Interface::as_raw(mutex), key, timeout_ms)
+    };
+    if hr == S_OK {
+        Ok(true)
+    } else if hr.0 == 0x102 {
+        Ok(false)
+    } else {
+        anyhow::bail!("AcquireSync failed: {hr:?}")
+    }
+}
+
 fn set_pipeline_state(
     device_context: &ID3D11DeviceContext,
     buffer_view: &[Option<ID3D11ShaderResourceView>],
@@ -1787,6 +1933,7 @@ pub(crate) mod shader_resources {
         SubpixelSprite,
         PolychromeSprite,
         EmojiRasterization,
+        Surface,
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1863,6 +2010,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::EmojiRasterization => match target {
                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
                     ShaderTarget::Fragment => EMOJI_RASTERIZATION_FRAGMENT_BYTES,
+                },
+                ShaderModule::Surface => match target {
+                    ShaderTarget::Vertex => SURFACE_VERTEX_BYTES,
+                    ShaderTarget::Fragment => SURFACE_FRAGMENT_BYTES,
                 },
             };
             Self { inner: bytes }
@@ -1951,6 +2102,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
+                ShaderModule::Surface => "surface",
             }
         }
     }
