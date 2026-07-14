@@ -4246,6 +4246,45 @@ impl Window {
         });
     }
 
+    /// Paint a DMABuf-backed video frame into the scene for the next frame at
+    /// the current z-index. Zero-copy: the Vulkan renderer imports the dmabuf
+    /// directly. Check [`Self::supports_dmabuf_surfaces`] first — on
+    /// unsupported renderers (GL fallback) the surface draws nothing.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(target_os = "linux")]
+    pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, frame: crate::DmabufFrame) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            frame,
+        });
+    }
+
+    /// Whether this window's renderer can present DMABuf video frames
+    /// zero-copy (Vulkan with the external-memory + DRM-modifier extensions).
+    /// Callers use this to pick between a dmabuf pipeline and a CPU copy path.
+    #[cfg(target_os = "linux")]
+    pub fn supports_dmabuf_surfaces(&self) -> bool {
+        self.platform_window.supports_dmabuf_surfaces()
+    }
+
+    /// The DRM format + modifier pairs this window's renderer can import as
+    /// DMABuf video frames — the list a video producer should negotiate its
+    /// export format against. Empty when zero-copy presentation is
+    /// unsupported.
+    #[cfg(target_os = "linux")]
+    pub fn supported_dmabuf_formats(&self) -> Vec<crate::DmabufFormat> {
+        self.platform_window.supported_dmabuf_formats()
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

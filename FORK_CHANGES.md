@@ -134,7 +134,13 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 | (pending) | **taffy `=0.10.1` → `=0.12.1`.** Taffy 0.10/0.11 has a layout bug: inside a `Display::Block` container that is itself an auto-sized flex item (gpui's plain `div()` default), a flex-column's percent-width child collapses to width 0 whenever a sibling subtree contains flex items with a pixel `flex_basis`. Real-world symptom: Elane's embedded terminal (`h(300).w_full()` next to resizable panels with measured `flex_basis`) rendered 1 column wide. Fixed upstream in taffy 0.12. Regression test: `taffy::tests::percent_width_child_in_block_wrapped_flex_column` (a downgrade also fails to build: `style.rs` uses taffy 0.12's `AlignItems::START` keyword consts). **When re-merging upstream zed (still pins `=0.10.1`), keep the 0.12 pin.** |
 | (pending) | `GPUI_LAYOUT_DEBUG=1` dumps every solved taffy tree (per-node style + computed layout) to stderr — replay against a standalone taffy crate to bisect engine-level layout bugs. See `TaffyLayoutEngine::compute_layout`. |
 
-## 12. Docs
+## 12. Zero-copy DMABuf video surfaces (Linux)
+
+| Commit | Change |
+|---|---|
+| (pending) | **Linux zero-copy video presentation.** New `gpui::DmabufFrame`/`DmabufPlane`/`DmabufFormat` types (`gpui/src/dmabuf.rs`) + `SurfaceSource::Dmabuf` arm and a Linux `surface()`/`Window::paint_surface`, resurrecting the previously macOS-only surface primitive. wgpu device creation routes through wgpu-hal `open_with_callback` to enable `VK_EXT_image_drm_format_modifier` (`external_memory_fd`/`_dma_buf` auto-added), falling back to `request_device`; `wgpu_context.rs` queries the device's importable NV12 DRM modifiers (`DrmFormatModifierPropertiesListEXT`, 2-memory-plane + SAMPLED) exposed as `Window::supported_dmabuf_formats()` for Wayland-compositor-style format negotiation with producers. New `gpui_wgpu/src/dmabuf_texture.rs` imports a frame as ONE multiplanar `VkImage` (DRM-modifier tiling, explicit plane layouts, dedicated fd import via ash) wrapped as `wgpu::TextureFormat::NV12`; the previously stubbed `PrimitiveBatch::Surfaces` draw arm samples `TextureAspect::Plane0/Plane1` views through the existing `fs_surface` pipeline. The YCbCr→RGB matrix moved from a shader constant (BT.601 full — wrong for HD) into `SurfaceParams`, supplied per frame (BT.601 full/limited, BT.709/BT.2020 limited presets). New dep: `ash 0.38` (matching wgpu-hal) on Linux. Consumer: Elane's video preview (elane-media). |
+
+## 13. Docs
 
 | Commit | Change |
 |---|---|

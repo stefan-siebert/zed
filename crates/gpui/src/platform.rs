@@ -764,6 +764,22 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
+    /// Whether this window's renderer can import and present DMABuf video
+    /// frames zero-copy (Linux Vulkan renderer with the external-memory and
+    /// DRM-format-modifier extensions). Default: unsupported.
+    #[cfg(target_os = "linux")]
+    fn supports_dmabuf_surfaces(&self) -> bool {
+        false
+    }
+
+    /// The DRM format + modifier pairs this window's renderer can import as
+    /// DMABuf video frames. Video producers negotiate their export against
+    /// this list. Empty when unsupported.
+    #[cfg(target_os = "linux")]
+    fn supported_dmabuf_formats(&self) -> Vec<crate::DmabufFormat> {
+        Vec::new()
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
     fn play_system_bell(&self) {}

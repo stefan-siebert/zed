@@ -1,4 +1,6 @@
 mod cosmic_text_system;
+#[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+mod dmabuf_texture;
 mod wgpu_atlas;
 mod wgpu_context;
 mod wgpu_renderer;

@@ -18,6 +18,8 @@ mod bounds_tree;
 mod color;
 /// The default colors used by GPUI.
 pub mod colors;
+#[cfg(target_os = "linux")]
+mod dmabuf;
 mod element;
 mod elements;
 mod executor;
@@ -93,6 +95,8 @@ pub(crate) use arena::*;
 pub use asset_cache::*;
 pub use assets::*;
 pub use color::*;
+#[cfg(target_os = "linux")]
+pub use dmabuf::*;
 pub use ctor::ctor;
 pub use element::*;
 pub use elements::*;

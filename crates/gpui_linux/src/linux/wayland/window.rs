@@ -1641,6 +1641,14 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().renderer.gpu_specs().into()
     }
 
+    fn supports_dmabuf_surfaces(&self) -> bool {
+        self.borrow().renderer.supports_dmabuf_surfaces()
+    }
+
+    fn supported_dmabuf_formats(&self) -> Vec<gpui::DmabufFormat> {
+        self.borrow().renderer.supported_dmabuf_formats()
+    }
+
     fn play_system_bell(&self) {
         let state = self.borrow();
         let surface = if state.surface_state.toplevel().is_some() {

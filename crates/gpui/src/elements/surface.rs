@@ -12,12 +12,24 @@ pub enum SurfaceSource {
     /// A macOS image buffer from CoreVideo
     #[cfg(target_os = "macos")]
     Surface(CVPixelBuffer),
+    /// A DMABuf-backed video frame, imported zero-copy by the Vulkan
+    /// renderer. Check [`Window::supports_dmabuf_surfaces`] before using;
+    /// unsupported frames render as nothing.
+    #[cfg(target_os = "linux")]
+    Dmabuf(crate::DmabufFrame),
 }
 
 #[cfg(target_os = "macos")]
 impl From<CVPixelBuffer> for SurfaceSource {
     fn from(value: CVPixelBuffer) -> Self {
         SurfaceSource::Surface(value)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<crate::DmabufFrame> for SurfaceSource {
+    fn from(value: crate::DmabufFrame) -> Self {
+        SurfaceSource::Dmabuf(value)
     }
 }
 
@@ -29,7 +41,7 @@ pub struct Surface {
 }
 
 /// Create a new surface element.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
@@ -86,10 +98,18 @@ impl Element for Surface {
         &mut self,
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] bounds: Bounds<Pixels>,
+        #[cfg_attr(
+            not(any(target_os = "macos", target_os = "linux")),
+            allow(unused_variables)
+        )]
+        bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
-        #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] window: &mut Window,
+        #[cfg_attr(
+            not(any(target_os = "macos", target_os = "linux")),
+            allow(unused_variables)
+        )]
+        window: &mut Window,
         _: &mut App,
     ) {
         match &self.source {
@@ -99,6 +119,15 @@ impl Element for Surface {
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
                 // TODO: Add support for corner_radii
                 window.paint_surface(new_bounds, surface.clone());
+            }
+            #[cfg(target_os = "linux")]
+            SurfaceSource::Dmabuf(frame) => {
+                let size = crate::size(
+                    crate::DevicePixels(frame.width as i32),
+                    crate::DevicePixels(frame.height as i32),
+                );
+                let new_bounds = self.object_fit.get_bounds(bounds, size);
+                window.paint_surface(new_bounds, frame.clone());
             }
             #[allow(unreachable_patterns)]
             _ => {}

@@ -43,6 +43,9 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 struct SurfaceParams {
     bounds: PodBounds,
     content_mask: PodBounds,
+    /// Column-major YCbCr→RGB matrix for the frame's colorimetry (applied to
+    /// the (Y, Cb, Cr, 1) vector), supplied by the frame producer.
+    ycbcr_to_rgb: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -150,6 +153,14 @@ pub struct WgpuRenderer {
     rendering_params: RenderingParameters,
     is_bgr: bool,
     dual_source_blending: bool,
+    /// Device supports zero-copy DMABuf video-frame import (Vulkan +
+    /// DRM-format-modifier extension + NV12 textures).
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    dmabuf_import: bool,
+    /// (fourcc, modifier) pairs the device can import — the negotiation list
+    /// handed to video producers.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    dmabuf_formats: Vec<(u32, u64)>,
     adapter_info: wgpu::AdapterInfo,
     transparent_alpha_mode: wgpu::CompositeAlphaMode,
     opaque_alpha_mode: wgpu::CompositeAlphaMode,
@@ -352,6 +363,10 @@ impl WgpuRenderer {
 
         let queue = Arc::clone(&context.queue);
         let dual_source_blending = context.supports_dual_source_blending();
+        #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+        let dmabuf_import = context.supports_dmabuf_import();
+        #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+        let dmabuf_formats = context.supported_dmabuf_formats();
 
         let rendering_params = RenderingParameters::new(&context.adapter, surface_format);
         let bind_group_layouts = Self::create_bind_group_layouts(&device);
@@ -482,6 +497,10 @@ impl WgpuRenderer {
             rendering_params,
             is_bgr: false,
             dual_source_blending,
+            #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+            dmabuf_import,
+            #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+            dmabuf_formats,
             adapter_info,
             transparent_alpha_mode,
             opaque_alpha_mode,
@@ -1305,10 +1324,18 @@ impl WgpuRenderer {
                                 &mut instance_offset,
                                 &mut pass,
                             ),
-                        PrimitiveBatch::Surfaces(_surfaces) => {
-                            // Surfaces are macOS-only for video playback
-                            // Not implemented for Linux/wgpu
-                            true
+                        PrimitiveBatch::Surfaces(range) => {
+                            #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+                            {
+                                self.draw_surfaces(&scene.surfaces[range], &mut pass)
+                            }
+                            #[cfg(not(all(target_os = "linux", not(target_family = "wasm"))))]
+                            {
+                                // macOS renders surfaces through Metal; other
+                                // platforms carry no surface payload.
+                                let _ = range;
+                                true
+                            }
                         }
                         PrimitiveBatch::CustomShaders { shader_id, range } => {
                             self.draw_custom_shaders(
@@ -1457,6 +1484,117 @@ impl WgpuRenderer {
             instance_offset,
             pass,
         )
+    }
+
+    /// Whether this renderer can present DMABuf video frames zero-copy.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    pub fn supports_dmabuf_surfaces(&self) -> bool {
+        self.dmabuf_import && !self.dmabuf_formats.is_empty()
+    }
+
+    /// The DRM format + modifier pairs this renderer can import.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    pub fn supported_dmabuf_formats(&self) -> Vec<gpui::DmabufFormat> {
+        self.dmabuf_formats
+            .iter()
+            .map(|&(fourcc, modifier)| gpui::DmabufFormat { fourcc, modifier })
+            .collect()
+    }
+
+    /// Draw DMABuf-backed video surfaces: import each frame as an NV12
+    /// texture and sample its luma/chroma planes with the `fs_surface`
+    /// YCbCr pipeline. Frames that fail to import are skipped (logged), so
+    /// one bad frame never kills the whole render pass.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    fn draw_surfaces(
+        &self,
+        surfaces: &[gpui::PaintSurface],
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> bool {
+        if surfaces.is_empty() {
+            return true;
+        }
+        if !self.dmabuf_import {
+            // GL fallback or missing extensions: callers should have checked
+            // supports_dmabuf_surfaces(); drop the frames rather than crash.
+            log::debug!("dmabuf surfaces skipped: renderer lacks import support");
+            return true;
+        }
+        let resources = self.resources();
+        for surface in surfaces {
+            let texture =
+                match crate::dmabuf_texture::import_dmabuf_texture(&resources.device, &surface.frame)
+                {
+                    Ok(texture) => texture,
+                    Err(err) => {
+                        log::warn!("dmabuf video frame import failed: {err:#}");
+                        continue;
+                    }
+                };
+            let luma_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("dmabuf_video_luma"),
+                format: Some(wgpu::TextureFormat::R8Unorm),
+                aspect: wgpu::TextureAspect::Plane0,
+                ..Default::default()
+            });
+            let chroma_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("dmabuf_video_chroma"),
+                format: Some(wgpu::TextureFormat::Rg8Unorm),
+                aspect: wgpu::TextureAspect::Plane1,
+                ..Default::default()
+            });
+
+            let params = SurfaceParams {
+                bounds: surface.bounds.into(),
+                content_mask: surface.content_mask.bounds.into(),
+                ycbcr_to_rgb: surface.frame.color_matrix,
+            };
+            // A dedicated tiny uniform buffer per surface: the shared
+            // instance buffer is STORAGE-usage, and there is at most a
+            // handful of video surfaces per frame.
+            let params_buffer = resources.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("dmabuf_surface_params"),
+                size: std::mem::size_of::<SurfaceParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM,
+                mapped_at_creation: true,
+            });
+            params_buffer
+                .slice(..)
+                .get_mapped_range_mut()
+                .copy_from_slice(bytemuck::bytes_of(&params));
+            params_buffer.unmap();
+
+            let bind_group = resources
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("dmabuf_surface_bind_group"),
+                    layout: &resources.bind_group_layouts.surfaces,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&luma_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&chroma_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
+                        },
+                    ],
+                });
+
+            pass.set_pipeline(&resources.pipelines.surfaces);
+            pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+            pass.set_bind_group(1, &bind_group, &[]);
+            pass.draw(0..4, 0..1);
+        }
+        true
     }
 
     fn draw_instances(

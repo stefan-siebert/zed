@@ -155,16 +155,42 @@ impl WgpuContext {
                 Subpixel text antialiasing will be disabled."
             );
         }
+        // NV12 textures back zero-copy video frames (dmabuf import on Linux);
+        // requesting the format costs nothing where video never plays.
+        if adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_FORMAT_NV12)
+        {
+            required_features |= wgpu::Features::TEXTURE_FORMAT_NV12;
+        }
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
+
+        let required_limits = wgpu::Limits::downlevel_defaults()
+            .using_resolution(adapter.limits())
+            .using_alignment(adapter.limits());
+
+        // On Vulkan, route device creation through wgpu-hal so the DRM-format-
+        // modifier extension needed for dmabuf video import can be enabled
+        // (external_memory_fd/_dma_buf are auto-added when supported). Any
+        // failure falls back to the ordinary request_device path below.
+        #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+        if let Some((device, queue)) =
+            Self::create_device_with_dmabuf(adapter, required_features, &required_limits)
+        {
+            return Ok((
+                device,
+                queue,
+                dual_source_blending,
+                color_atlas_texture_format,
+            ));
+        }
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("gpui_device"),
                 required_features,
-                required_limits: wgpu::Limits::downlevel_defaults()
-                    .using_resolution(adapter.limits())
-                    .using_alignment(adapter.limits()),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -178,6 +204,163 @@ impl WgpuContext {
             dual_source_blending,
             color_atlas_texture_format,
         ))
+    }
+
+    /// Create the device through wgpu-hal with `VK_EXT_image_drm_format_modifier`
+    /// enabled, so dmabuf video frames can be imported zero-copy. Returns
+    /// `None` (→ caller falls back to `request_device`) on non-Vulkan
+    /// adapters, missing extension support, or any hal failure.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    fn create_device_with_dmabuf(
+        adapter: &wgpu::Adapter,
+        required_features: wgpu::Features,
+        required_limits: &wgpu::Limits,
+    ) -> Option<(wgpu::Device, wgpu::Queue)> {
+        use wgpu::hal::api::Vulkan;
+
+        const DRM_MODIFIER_EXT: &std::ffi::CStr = ash::ext::image_drm_format_modifier::NAME;
+
+        // SAFETY: the adapter guard is only used while alive; raw handles are
+        // queried, not stored.
+        let supported = unsafe {
+            let hal_adapter = adapter.as_hal::<Vulkan>()?;
+            let instance = hal_adapter.shared_instance().raw_instance();
+            let extensions = instance
+                .enumerate_device_extension_properties(hal_adapter.raw_physical_device())
+                .ok()?;
+            extensions
+                .iter()
+                .any(|properties| properties.extension_name_as_c_str() == Ok(DRM_MODIFIER_EXT))
+        };
+        if !supported {
+            log::info!(
+                "VK_EXT_image_drm_format_modifier not supported; dmabuf video import disabled"
+            );
+            return None;
+        }
+
+        // SAFETY: open_with_callback only adds an extension the adapter was
+        // just verified to support; the OpenDevice is handed straight to
+        // create_device_from_hal on the same adapter.
+        let open_device = unsafe {
+            let hal_adapter = adapter.as_hal::<Vulkan>()?;
+            hal_adapter
+                .open_with_callback(
+                    required_features,
+                    required_limits,
+                    &wgpu::MemoryHints::MemoryUsage,
+                    Some(Box::new(|args: wgpu::hal::vulkan::CreateDeviceCallbackArgs| {
+                        args.extensions.push(DRM_MODIFIER_EXT);
+                    })),
+                )
+                .map_err(|err| {
+                    log::warn!("Vulkan hal device open failed ({err:?}); dmabuf import disabled")
+                })
+                .ok()?
+        };
+
+        // SAFETY: OpenDevice comes from this adapter, features/limits match.
+        unsafe {
+            adapter.create_device_from_hal::<Vulkan>(
+                open_device,
+                &wgpu::DeviceDescriptor {
+                    label: Some("gpui_device"),
+                    required_features,
+                    required_limits: required_limits.clone(),
+                    memory_hints: wgpu::MemoryHints::MemoryUsage,
+                    trace: wgpu::Trace::Off,
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                },
+            )
+        }
+        .map_err(|err| {
+            log::warn!("create_device_from_hal failed ({err:?}); dmabuf import disabled")
+        })
+        .ok()
+    }
+
+    /// Whether this device can import DMABuf video frames (Vulkan with the
+    /// DRM-format-modifier extension enabled and NV12 texture support).
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    pub fn supports_dmabuf_import(&self) -> bool {
+        use wgpu::hal::api::Vulkan;
+
+        if !self
+            .device
+            .features()
+            .contains(wgpu::Features::TEXTURE_FORMAT_NV12)
+        {
+            return false;
+        }
+        // SAFETY: read-only query on the live device.
+        unsafe {
+            self.device.as_hal::<Vulkan>().is_some_and(|hal_device| {
+                hal_device
+                    .enabled_device_extensions()
+                    .contains(&ash::ext::image_drm_format_modifier::NAME)
+            })
+        }
+    }
+
+    /// The DRM format + modifier pairs this device can import and sample as
+    /// DMABuf video frames: NV12 with every modifier the driver reports as
+    /// sampleable with a two-plane memory layout (our importer describes
+    /// exactly the two NV12 planes, so modifiers with extra metadata planes —
+    /// e.g. compressed AMD DCC layouts — are excluded). Empty when dmabuf
+    /// import is unsupported.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    pub fn supported_dmabuf_formats(&self) -> Vec<(u32, u64)> {
+        use wgpu::hal::api::Vulkan;
+
+        if !self.supports_dmabuf_import() {
+            return Vec::new();
+        }
+        const DRM_FOURCC_NV12: u32 = u32::from_le_bytes(*b"NV12");
+
+        // SAFETY: read-only physical-device query.
+        unsafe {
+            let Some(hal_device) = self.device.as_hal::<Vulkan>() else {
+                return Vec::new();
+            };
+            let instance = hal_device.shared_instance().raw_instance();
+            let physical_device = hal_device.raw_physical_device();
+
+            // Two-call pattern: count, then fill.
+            let mut modifier_list = ash::vk::DrmFormatModifierPropertiesListEXT::default();
+            let mut properties =
+                ash::vk::FormatProperties2::default().push_next(&mut modifier_list);
+            instance.get_physical_device_format_properties2(
+                physical_device,
+                ash::vk::Format::G8_B8R8_2PLANE_420_UNORM,
+                &mut properties,
+            );
+            let count = modifier_list.drm_format_modifier_count as usize;
+            if count == 0 {
+                return Vec::new();
+            }
+            let mut modifiers =
+                vec![ash::vk::DrmFormatModifierPropertiesEXT::default(); count];
+            let mut modifier_list = ash::vk::DrmFormatModifierPropertiesListEXT::default()
+                .drm_format_modifier_properties(&mut modifiers);
+            let mut properties =
+                ash::vk::FormatProperties2::default().push_next(&mut modifier_list);
+            instance.get_physical_device_format_properties2(
+                physical_device,
+                ash::vk::Format::G8_B8R8_2PLANE_420_UNORM,
+                &mut properties,
+            );
+
+            modifiers
+                .iter()
+                .filter(|properties| {
+                    properties.drm_format_modifier_plane_count == 2
+                        && properties
+                            .drm_format_modifier_tiling_features
+                            .contains(ash::vk::FormatFeatureFlags::SAMPLED_IMAGE)
+                })
+                .map(|properties| (DRM_FOURCC_NV12, properties.drm_format_modifier))
+                .collect()
+        }
     }
 
     #[cfg(not(target_family = "wasm"))]
