@@ -20,6 +20,8 @@ mod color;
 pub mod colors;
 #[cfg(target_os = "linux")]
 mod dmabuf;
+#[cfg(target_os = "windows")]
+mod d3d11_surface;
 mod element;
 mod elements;
 mod executor;
@@ -97,6 +99,8 @@ pub use assets::*;
 pub use color::*;
 #[cfg(target_os = "linux")]
 pub use dmabuf::*;
+#[cfg(target_os = "windows")]
+pub use d3d11_surface::*;
 pub use ctor::ctor;
 pub use element::*;
 pub use elements::*;

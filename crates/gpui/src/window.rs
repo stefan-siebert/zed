@@ -4268,12 +4268,59 @@ impl Window {
         });
     }
 
+    /// Paint a shared-D3D11-texture video frame into the scene for the next
+    /// frame at the current z-index. Zero-copy: the DirectX renderer opens
+    /// the shared handle and samples the producer's texture directly. Check
+    /// [`Self::supports_video_surfaces`] first — on unsupported renderers the
+    /// surface draws nothing.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(target_os = "windows")]
+    pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, frame: crate::D3d11Frame) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            frame,
+        });
+    }
+
     /// Whether this window's renderer can present DMABuf video frames
     /// zero-copy (Vulkan with the external-memory + DRM-modifier extensions).
     /// Callers use this to pick between a dmabuf pipeline and a CPU copy path.
     #[cfg(target_os = "linux")]
     pub fn supports_dmabuf_surfaces(&self) -> bool {
         self.platform_window.supports_dmabuf_surfaces()
+    }
+
+    /// Whether this window's renderer can present video frames zero-copy
+    /// through `gpui::surface()` — platform-neutral: CVPixelBuffer surfaces
+    /// on macOS, DMABuf import on Linux (Vulkan), shared D3D11 textures on
+    /// Windows. Callers use this to pick between a zero-copy pipeline and a
+    /// CPU copy path.
+    pub fn supports_video_surfaces(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            true
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.platform_window.supports_dmabuf_surfaces()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.platform_window.supports_d3d11_surfaces()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            false
+        }
     }
 
     /// The DRM format + modifier pairs this window's renderer can import as

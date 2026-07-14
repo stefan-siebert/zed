@@ -17,6 +17,11 @@ pub enum SurfaceSource {
     /// unsupported frames render as nothing.
     #[cfg(target_os = "linux")]
     Dmabuf(crate::DmabufFrame),
+    /// A shared-D3D11-texture video frame, imported zero-copy by the DirectX
+    /// renderer. Check [`Window::supports_video_surfaces`] before using;
+    /// unsupported frames render as nothing.
+    #[cfg(target_os = "windows")]
+    D3d11(crate::D3d11Frame),
 }
 
 #[cfg(target_os = "macos")]
@@ -33,6 +38,13 @@ impl From<crate::DmabufFrame> for SurfaceSource {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl From<crate::D3d11Frame> for SurfaceSource {
+    fn from(value: crate::D3d11Frame) -> Self {
+        SurfaceSource::D3d11(value)
+    }
+}
+
 /// A surface element.
 pub struct Surface {
     source: SurfaceSource,
@@ -41,7 +53,7 @@ pub struct Surface {
 }
 
 /// Create a new surface element.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
@@ -99,14 +111,14 @@ impl Element for Surface {
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "linux")),
+            not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
             allow(unused_variables)
         )]
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "linux")),
+            not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
             allow(unused_variables)
         )]
         window: &mut Window,
@@ -122,6 +134,15 @@ impl Element for Surface {
             }
             #[cfg(target_os = "linux")]
             SurfaceSource::Dmabuf(frame) => {
+                let size = crate::size(
+                    crate::DevicePixels(frame.width as i32),
+                    crate::DevicePixels(frame.height as i32),
+                );
+                let new_bounds = self.object_fit.get_bounds(bounds, size);
+                window.paint_surface(new_bounds, frame.clone());
+            }
+            #[cfg(target_os = "windows")]
+            SurfaceSource::D3d11(frame) => {
                 let size = crate::size(
                     crate::DevicePixels(frame.width as i32),
                     crate::DevicePixels(frame.height as i32),

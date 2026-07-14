@@ -776,6 +776,8 @@ pub struct PaintSurface {
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
     #[cfg(target_os = "linux")]
     pub frame: crate::DmabufFrame,
+    #[cfg(target_os = "windows")]
+    pub frame: crate::D3d11Frame,
 }
 
 impl From<PaintSurface> for Primitive {

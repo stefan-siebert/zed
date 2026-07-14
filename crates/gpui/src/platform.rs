@@ -780,6 +780,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         Vec::new()
     }
 
+    /// Whether this window's renderer can import and present shared-D3D11-
+    /// texture video frames zero-copy (DirectX renderer opening NT shared
+    /// handles). Default: unsupported.
+    #[cfg(target_os = "windows")]
+    fn supports_d3d11_surfaces(&self) -> bool {
+        false
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
     fn play_system_bell(&self) {}
