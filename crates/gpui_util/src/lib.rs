@@ -245,11 +245,23 @@ where
         match self {
             Ok(value) => Some(value),
             Err(error) => {
-                log_error_with_caller(
-                    *Location::caller(),
-                    DebugAsDisplay(&error),
-                    log::Level::Error,
-                );
+                let mut message = format!("{:?}", error);
+                // anyhow embeds a backtrace in `{:?}` only when capture was
+                // enabled at error *construction* (RUST_[LIB_]BACKTRACE,
+                // cached by std on first use — a later set_var is a no-op).
+                // Call sites use this method because they need the stack, so
+                // when the error carries none, capture at the log site
+                // instead: for these synchronous results the log site is in
+                // the same stack as the error's construction.
+                if !message.contains("Stack backtrace:") {
+                    use std::fmt::Write as _;
+                    let _ = write!(
+                        message,
+                        "\n\nLog-site backtrace:\n{}",
+                        std::backtrace::Backtrace::force_capture()
+                    );
+                }
+                log_error_with_caller(*Location::caller(), message, log::Level::Error);
                 None
             }
         }

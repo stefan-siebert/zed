@@ -1483,8 +1483,9 @@ impl Window {
                 // platform delivers the frame message re-entrantly while the
                 // App is borrowed — i.e. something inside an update pumped
                 // the message queue. The failure stack names that something,
-                // so capture it (backtrace only materializes on error, and
-                // only with RUST_BACKTRACE/RUST_LIB_BACKTRACE set).
+                // so capture it (backtrace only materializes on error;
+                // if anyhow didn't capture one at construction, the logger
+                // force-captures at the log site — same stack here).
                 let thermal_state = handle
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
                     .log_err_with_backtrace();
