@@ -7,8 +7,8 @@ use cosmic_text::{
 use gpui::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun, GlyphId,
     LineLayout, Pixels, PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X,
-    SUBPIXEL_VARIANTS_Y, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode, point,
-    size,
+    SUBPIXEL_VARIANTS_Y, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode,
+    blur_alpha_mask, point, size,
 };
 
 use itertools::Itertools;
@@ -920,58 +920,6 @@ fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     postscript_name == "NotoColorEmoji"
 }
 
-/// Separable Gaussian blur on a single-channel alpha mask.
-fn blur_alpha_mask(data: &mut [u8], width: usize, height: usize, radius: f32) {
-    if width == 0 || height == 0 || radius < 0.5 {
-        return;
-    }
-    let sigma = radius / 2.0;
-    let kernel_radius = (sigma * 3.0).ceil() as usize;
-    if kernel_radius == 0 {
-        return;
-    }
-    // Build 1D Gaussian kernel.
-    let kernel_size = kernel_radius * 2 + 1;
-    let mut kernel = vec![0.0_f32; kernel_size];
-    let mut sum = 0.0_f32;
-    for i in 0..kernel_size {
-        let x = i as f32 - kernel_radius as f32;
-        let val = (-x * x / (2.0 * sigma * sigma)).exp();
-        kernel[i] = val;
-        sum += val;
-    }
-    for v in &mut kernel {
-        *v /= sum;
-    }
-
-    let mut temp = vec![0.0_f32; width * height];
-
-    // Horizontal pass: data → temp
-    for y in 0..height {
-        for x in 0..width {
-            let mut acc = 0.0_f32;
-            for k in 0..kernel_size {
-                let sx = x as isize + k as isize - kernel_radius as isize;
-                let sx = sx.clamp(0, width as isize - 1) as usize;
-                acc += data[y * width + sx] as f32 * kernel[k];
-            }
-            temp[y * width + x] = acc;
-        }
-    }
-
-    // Vertical pass: temp → data
-    for y in 0..height {
-        for x in 0..width {
-            let mut acc = 0.0_f32;
-            for k in 0..kernel_size {
-                let sy = y as isize + k as isize - kernel_radius as isize;
-                let sy = sy.clamp(0, height as isize - 1) as usize;
-                acc += temp[sy * width + x] * kernel[k];
-            }
-            data[y * width + x] = (acc.round() as u8).min(255);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

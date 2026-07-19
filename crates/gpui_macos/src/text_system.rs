@@ -37,7 +37,8 @@ use gpui::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
     FontStyle, FontWeight, GlyphId, Hsla, LineLayout, Pixels, PlatformTextSystem,
     RenderGlyphParams, Result, Rgba, SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString,
-    Size, TextRenderingMode, point, px, size, swap_rgba_pa_to_bgra,
+    Size, TextRenderingMode, blur_alpha_mask, embolden_alpha_mask, glow_padding_pixels, point, px,
+    size, swap_rgba_pa_to_bgra,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use pathfinder_geometry::{
@@ -405,8 +406,10 @@ impl MacTextSystemState {
             font_kit::canvas::RasterizationOptions::GrayscaleAa,
         )?);
 
-        // Expand the bounds by 1 pixel on each side to give CG room for anti-aliasing.
-        Ok(bounds.dilate(DevicePixels(1)))
+        // Expand the bounds by 1 pixel on each side to give CG room for
+        // anti-aliasing, plus the glow padding (embolden + blur) for glow
+        // glyph variants so the post-processed mask doesn't clip.
+        Ok(bounds.dilate(DevicePixels(1 + glow_padding_pixels(params))))
     }
 
     fn rasterize_glyph(
@@ -498,6 +501,20 @@ impl MacTextSystemState {
                 // Convert from RGBA with premultiplied alpha to BGRA with straight alpha.
                 for pixel in bytes.chunks_exact_mut(4) {
                     swap_rgba_pa_to_bgra(pixel);
+                }
+            } else if let Some(glow) = &params.embolden {
+                // Glow path: thicken the outline (max filter ≈ morphological
+                // dilation), then blur. `raster_bounds` already reserved
+                // padding around the glyph for these operations.
+                let width = bitmap_size.width.0 as usize;
+                let height = bitmap_size.height.0 as usize;
+                let embolden_px = (glow.embolden * params.scale_factor).round() as usize;
+                if embolden_px > 0 {
+                    embolden_alpha_mask(&mut bytes, width, height, embolden_px);
+                }
+                let blur_radius = glow.blur_radius * params.scale_factor;
+                if blur_radius >= 0.5 {
+                    blur_alpha_mask(&mut bytes, width, height, blur_radius);
                 }
             }
 

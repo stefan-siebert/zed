@@ -6087,7 +6087,7 @@ impl Window {
 
                 InspectorElementInfo {
                     bounds: hitbox.bounds,
-                    content_mask: hitbox.content_mask.clone(),
+                    content_mask: hitbox.content_mask,
                     global_id: format!("{}", inspector_id.path.global_id),
                     source_location: format!("{}", inspector_id.path.source_location),
                     instance_id: inspector_id.instance_id,

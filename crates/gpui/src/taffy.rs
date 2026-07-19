@@ -797,8 +797,6 @@ mod tests {
     /// below 0.12.
     #[test]
     fn percent_width_child_in_block_wrapped_flex_column() {
-        use taffy::prelude::*;
-
         let mut tree: taffy::TaffyTree<()> = taffy::TaffyTree::new();
         tree.disable_rounding();
 

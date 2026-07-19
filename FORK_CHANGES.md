@@ -49,6 +49,7 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 | `f4828a22` | Restore `CustomShaders` arm in macOS metal renderer match |
 | `7b4ffb22` | Fix Point/Size field access in vignette & shimmer effects |
 | `ec534b9e` | Custom-shader instances: clear per frame + 16-byte instance stride |
+| (pending) | **Text glow on macOS.** `gpui_macos`'s CoreGraphics rasterizer ignored `RenderGlyphParams::embolden`, so glow glyphs rasterized as plain sharp glyphs painted underneath the foreground pass — fully occluded, i.e. `text_glow()` silently did nothing on macOS (Elane titlebar wordmark). The mask-space glow post-processing (`glow_padding_pixels` / `embolden_alpha_mask` / `blur_alpha_mask`), previously duplicated across `gpui_windows/direct_write.rs` and `gpui_wgpu/cosmic_text_system.rs`, moved to shared `gpui/src/text_system/glow_mask.rs` (+ unit tests); both backends now import it and `gpui_macos/text_system.rs` applies it (padded `raster_bounds`, dilate + blur on the CG alpha mask, emoji path skipped). Also: `gpui`'s dev-dependency on `gpui_platform` now enables `runtime_shaders` so `cargo test -p gpui` builds on macOS without the Xcode Metal Toolchain component. |
 
 New/large files: `gpui_windows/src/directx_custom_shader.rs` (+419), `gpui_wgpu/src/wgpu_renderer.rs` (+464), `shaders.wgsl`, `shaders.metal`.
 

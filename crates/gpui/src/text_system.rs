@@ -1,11 +1,13 @@
 mod font_fallbacks;
 mod font_features;
+mod glow_mask;
 mod line;
 mod line_layout;
 mod line_wrapper;
 
 pub use font_fallbacks::*;
 pub use font_features::*;
+pub use glow_mask::*;
 pub use line::*;
 pub use line_layout::*;
 pub use line_wrapper::*;
