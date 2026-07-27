@@ -8,11 +8,10 @@ use anyhow::Result;
 use block::ConcreteBlock;
 use cocoa::{
     appkit::{
-        NSAppKitVersionNumber, NSAppKitVersionNumber12_0, NSApplication, NSBackingStoreBuffered,
-        NSColor, NSEvent, NSEventModifierFlags, NSFilenamesPboardType, NSPasteboard, NSScreen,
-        NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial,
-        NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
-        NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+        NSApplication, NSBackingStoreBuffered, NSColor, NSEvent, NSEventModifierFlags,
+        NSFilenamesPboardType, NSPasteboard, NSScreen, NSView, NSViewHeightSizable,
+        NSViewWidthSizable, NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState,
+        NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
     },
     base::{id, nil},
     foundation::{
@@ -76,7 +75,6 @@ const WINDOW_STATE_IVAR: &str = "windowState";
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
-static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
 
 #[allow(non_upper_case_globals)]
 const NSWindowStyleMaskNonactivatingPanel: NSWindowStyleMask =
@@ -292,18 +290,6 @@ unsafe fn build_classes() {
             );
             decl.register()
         };
-        BLURRED_VIEW_CLASS = {
-            let mut decl = ClassDecl::new("BlurredView", class!(NSVisualEffectView)).unwrap();
-            decl.add_method(
-                sel!(initWithFrame:),
-                blurred_view_init_with_frame as extern "C" fn(&Object, Sel, NSRect) -> id,
-            );
-            decl.add_method(
-                sel!(updateLayer),
-                blurred_view_update_layer as extern "C" fn(&Object, Sel),
-            );
-            decl.register()
-        };
     }
 }
 
@@ -484,7 +470,6 @@ struct MacWindowState {
     background_executor: BackgroundExecutor,
     native_window: id,
     native_view: NonNull<Object>,
-    blurred_view: Option<id>,
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
@@ -865,7 +850,6 @@ impl MacWindow {
                 background_executor,
                 native_window,
                 native_view: NonNull::new_unchecked(native_view),
-                blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
@@ -1497,43 +1481,25 @@ impl PlatformWindow for MacWindow {
             };
             this.native_window.setBackgroundColor_(background_color);
 
-            if NSAppKitVersionNumber < NSAppKitVersionNumber12_0 {
-                // Whether `-[NSVisualEffectView respondsToSelector:@selector(_updateProxyLayer)]`.
-                // On macOS Catalina/Big Sur `NSVisualEffectView` doesn’t own concrete sublayers
-                // but uses a `CAProxyLayer`. Use the legacy WindowServer API.
-                let blur_radius = if background_appearance == WindowBackgroundAppearance::Blurred {
-                    80
-                } else {
-                    0
-                };
-
-                let window_number = this.native_window.windowNumber();
-                CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), window_number, blur_radius);
+            // WindowServer Gaussian blur of the region behind the window —
+            // the same private API iTerm2 uses; still functional on macOS 26.
+            // Upstream Zed's modern-macOS path (an `NSVisualEffectView`
+            // subview) is deliberately NOT used: macOS 26 renders the
+            // materials' layer tree black under the old tint-stripping
+            // trick, and an untinted material (`UnderWindowBackground`) fogs
+            // the backdrop almost completely — measured ~4% desktop
+            // transmission under Elane's Liquid-Glass chrome, vs ~20% with
+            // this colorless WindowServer blur. The colorless blur also
+            // leaves surface tinting fully to the app's own translucent
+            // fills, which is what `WindowBackgroundAppearance::Blurred`
+            // promises.
+            let blur_radius = if background_appearance == WindowBackgroundAppearance::Blurred {
+                80
             } else {
-                // On newer macOS `NSVisualEffectView` manages the effect layer directly. Using it
-                // could have a better performance (it downsamples the backdrop) and more control
-                // over the effect layer.
-                if background_appearance != WindowBackgroundAppearance::Blurred {
-                    if let Some(blur_view) = this.blurred_view {
-                        NSView::removeFromSuperview(blur_view);
-                        this.blurred_view = None;
-                    }
-                } else if this.blurred_view.is_none() {
-                    let content_view = this.native_window.contentView();
-                    let frame = NSView::bounds(content_view);
-                    let mut blur_view: id = msg_send![BLURRED_VIEW_CLASS, alloc];
-                    blur_view = NSView::initWithFrame_(blur_view, frame);
-                    blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable);
-
-                    let _: () = msg_send![
-                        content_view,
-                        addSubview: blur_view
-                        positioned: NSWindowOrderingMode::NSWindowBelow
-                        relativeTo: nil
-                    ];
-                    this.blurred_view = Some(blur_view.autorelease());
-                }
-            }
+                0
+            };
+            let window_number = this.native_window.windowNumber();
+            CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), window_number, blur_radius);
         }
     }
 
@@ -2992,78 +2958,6 @@ unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
         let screen_number = device_description.objectForKey_(screen_number_key);
         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
         screen_number as CGDirectDisplayID
-    }
-}
-
-extern "C" fn blurred_view_init_with_frame(this: &Object, _: Sel, frame: NSRect) -> id {
-    unsafe {
-        let view = msg_send![super(this, class!(NSVisualEffectView)), initWithFrame: frame];
-        // Use a colorless semantic material. The default value `AppearanceBased`, though not
-        // manually set, is deprecated.
-        NSVisualEffectView::setMaterial_(view, NSVisualEffectMaterial::Selection);
-        NSVisualEffectView::setState_(view, NSVisualEffectState::Active);
-        view
-    }
-}
-
-extern "C" fn blurred_view_update_layer(this: &Object, _: Sel) {
-    unsafe {
-        let _: () = msg_send![super(this, class!(NSVisualEffectView)), updateLayer];
-        let layer: id = msg_send![this, layer];
-        if !layer.is_null() {
-            remove_layer_background(layer);
-        }
-    }
-}
-
-unsafe fn remove_layer_background(layer: id) {
-    unsafe {
-        let _: () = msg_send![layer, setBackgroundColor:nil];
-
-        let class_name: id = msg_send![layer, className];
-        if class_name.isEqualToString("CAChameleonLayer") {
-            // Remove the desktop tinting effect.
-            let _: () = msg_send![layer, setHidden: YES];
-            return;
-        }
-
-        let filters: id = msg_send![layer, filters];
-        if !filters.is_null() {
-            // Remove the increased saturation.
-            // The effect of a `CAFilter` or `CIFilter` is determined by its name, and the
-            // `description` reflects its name and some parameters. Currently `NSVisualEffectView`
-            // uses a `CAFilter` named "colorSaturate". If one day they switch to `CIFilter`, the
-            // `description` will still contain "Saturat" ("... inputSaturation = ...").
-            let test_string: id = ns_string("Saturat");
-            let count = NSArray::count(filters);
-            for i in 0..count {
-                let description: id = msg_send![filters.objectAtIndex(i), description];
-                let hit: BOOL = msg_send![description, containsString: test_string];
-                if hit == NO {
-                    continue;
-                }
-
-                let all_indices = NSRange {
-                    location: 0,
-                    length: count,
-                };
-                let indices: id = msg_send![class!(NSMutableIndexSet), indexSet];
-                let _: () = msg_send![indices, addIndexesInRange: all_indices];
-                let _: () = msg_send![indices, removeIndex:i];
-                let filtered: id = msg_send![filters, objectsAtIndexes: indices];
-                let _: () = msg_send![layer, setFilters: filtered];
-                break;
-            }
-        }
-
-        let sublayers: id = msg_send![layer, sublayers];
-        if !sublayers.is_null() {
-            let count = NSArray::count(sublayers);
-            for i in 0..count {
-                let sublayer = sublayers.objectAtIndex(i);
-                remove_layer_background(sublayer);
-            }
-        }
     }
 }
 
