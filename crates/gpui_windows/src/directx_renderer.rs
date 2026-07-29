@@ -19,9 +19,7 @@ use windows::{
     core::Interface,
 };
 
-use crate::directx_custom_shader::{
-    create_raw_instance_buffer_srv, CustomShaderResources,
-};
+use crate::directx_custom_shader::{CustomShaderResources, create_raw_instance_buffer_srv};
 use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
 use crate::*;
 use gpui::*;
@@ -369,6 +367,9 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                // Not implemented on this backend; `supports_backdrop_blur()`
+                // reports false so call sites fall back to a plain tinted fill.
+                PrimitiveBatch::BackdropBlurs(_) => Ok(()),
                 PrimitiveBatch::CustomShaders { shader_id, range } => {
                     self.draw_custom_shaders(shader_id, range.start, range.len())
                 }
@@ -423,6 +424,9 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                // Not implemented on this backend; `supports_backdrop_blur()`
+                // reports false so call sites fall back to a plain tinted fill.
+                PrimitiveBatch::BackdropBlurs(_) => Ok(()),
                 PrimitiveBatch::CustomShaders { shader_id, range } => {
                     self.draw_custom_shaders(shader_id, range.start, range.len())
                 }
@@ -959,14 +963,10 @@ impl DirectXRenderer {
             device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
             device_context.VSSetShader(&pipeline.vertex, None);
             device_context.PSSetShader(&pipeline.fragment, None);
-            device_context.VSSetConstantBuffers(
-                0,
-                Some(slice::from_ref(&self.globals.global_params_buffer)),
-            );
-            device_context.PSSetConstantBuffers(
-                0,
-                Some(slice::from_ref(&self.globals.global_params_buffer)),
-            );
+            device_context
+                .VSSetConstantBuffers(0, Some(slice::from_ref(&self.globals.global_params_buffer)));
+            device_context
+                .PSSetConstantBuffers(0, Some(slice::from_ref(&self.globals.global_params_buffer)));
             device_context.OMSetBlendState(&pipeline.blend_state, None, 0xFFFFFFFF);
             device_context.DrawInstanced(4, len as u32, 0, 0);
         }

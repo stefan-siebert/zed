@@ -1311,3 +1311,141 @@ float4 fill_color(Background background,
 
   return color;
 }
+
+// ── Backdrop blur ────────────────────────────────────────────────────────────
+//
+// Blurs what has ALREADY been painted into the render target, i.e. sibling
+// GPUI elements — a dialog frosting the file list behind it. It cannot reach
+// the desktop: the drawable never contains the wallpaper. The desktop is
+// blurred separately, window-wide, by the WindowServer
+// (`CGSSetWindowBackgroundBlurRadius`); the two compose, because this shader
+// preserves the target's alpha and so leaves the window as translucent as it
+// found it.
+//
+// Colour space: the target is `BGRA8Unorm`, so samples are sRGB-encoded and
+// premultiplied. The Kawase passes average them as-is rather than round-
+// tripping through linear light; on UI content (low local contrast) the error
+// is far below a quantisation step, and premultiplied linearisation would
+// need an unpremultiply/repremultiply per tap.
+
+struct FullscreenVertexOutput {
+  float4 position [[position]];
+  float2 uv;
+};
+
+vertex FullscreenVertexOutput kawase_vertex(
+    uint unit_vertex_id [[vertex_id]],
+    constant float2 *unit_vertices [[buffer(KawaseInputIndex_Vertices)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  FullscreenVertexOutput output;
+  // Unit square -> clip space, y flipped to match GPUI's top-left origin.
+  output.position =
+      float4(unit_vertex * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+  output.uv = unit_vertex;
+  return output;
+}
+
+// Dual Kawase downsample (Bjorge, ARM, SIGGRAPH 2015): centre tap plus four
+// diagonals, weighted 4:1:1:1:1.
+fragment float4 kawase_down_fragment(
+    FullscreenVertexOutput input [[stage_in]],
+    constant KawaseParams *params [[buffer(KawaseInputIndex_Params)]],
+    texture2d<float> source [[texture(KawaseInputIndex_SourceTexture)]]) {
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear,
+                                    address::clamp_to_edge);
+  float2 uv = input.uv;
+  // `texel` arrives as a C array (cbindgen renders `[f32; 2]` as
+  // `float[2]`), which Metal will not multiply by a scalar.
+  float2 offset = float2(params->texel[0], params->texel[1]) * params->offset;
+  float4 sum = source.sample(texture_sampler, uv) * 4.0;
+  sum += source.sample(texture_sampler, uv - offset);
+  sum += source.sample(texture_sampler, uv + offset);
+  sum += source.sample(texture_sampler, uv + float2(offset.x, -offset.y));
+  sum += source.sample(texture_sampler, uv - float2(offset.x, -offset.y));
+  return sum / 8.0;
+}
+
+// Dual Kawase upsample: eight taps on a rotated square, weighted 1:2 for the
+// axis-aligned and diagonal rings.
+fragment float4 kawase_up_fragment(
+    FullscreenVertexOutput input [[stage_in]],
+    constant KawaseParams *params [[buffer(KawaseInputIndex_Params)]],
+    texture2d<float> source [[texture(KawaseInputIndex_SourceTexture)]]) {
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear,
+                                    address::clamp_to_edge);
+  float2 uv = input.uv;
+  // `texel` arrives as a C array (cbindgen renders `[f32; 2]` as
+  // `float[2]`), which Metal will not multiply by a scalar.
+  float2 offset = float2(params->texel[0], params->texel[1]) * params->offset;
+  float4 sum = source.sample(texture_sampler, uv + float2(-offset.x * 2.0, 0.0));
+  sum += source.sample(texture_sampler, uv + float2(-offset.x, offset.y)) * 2.0;
+  sum += source.sample(texture_sampler, uv + float2(0.0, offset.y * 2.0));
+  sum += source.sample(texture_sampler, uv + float2(offset.x, offset.y)) * 2.0;
+  sum += source.sample(texture_sampler, uv + float2(offset.x * 2.0, 0.0));
+  sum += source.sample(texture_sampler, uv + float2(offset.x, -offset.y)) * 2.0;
+  sum += source.sample(texture_sampler, uv + float2(0.0, -offset.y * 2.0));
+  sum += source.sample(texture_sampler, uv + float2(-offset.x, -offset.y)) * 2.0;
+  return sum / 12.0;
+}
+
+struct BackdropBlurVertexOutput {
+  uint blur_id [[flat]];
+  float4 position [[position]];
+  float4 tint [[flat]];
+  float clip_distance [[clip_distance]][4];
+};
+
+struct BackdropBlurFragmentInput {
+  uint blur_id [[flat]];
+  float4 position [[position]];
+  float4 tint [[flat]];
+};
+
+vertex BackdropBlurVertexOutput backdrop_blur_vertex(
+    uint unit_vertex_id [[vertex_id]], uint blur_id [[instance_id]],
+    constant float2 *unit_vertices [[buffer(BackdropBlurInputIndex_Vertices)]],
+    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(BackdropBlurInputIndex_ViewportSize)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  BackdropBlur blur = blurs[blur_id];
+  float4 device_position =
+      to_device_position(unit_vertex, blur.bounds, viewport_size);
+  float4 clip_distance = distance_from_clip_rect(unit_vertex, blur.bounds,
+                                                 blur.content_mask.bounds);
+  float4 tint = hsla_to_rgba(blur.tint);
+  return BackdropBlurVertexOutput{
+      blur_id,
+      device_position,
+      tint,
+      {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+}
+
+fragment float4 backdrop_blur_fragment(
+    BackdropBlurFragmentInput input [[stage_in]],
+    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(BackdropBlurInputIndex_ViewportSize)]],
+    texture2d<float> blurred
+    [[texture(BackdropBlurInputIndex_BlurredTexture)]]) {
+  BackdropBlur blur = blurs[input.blur_id];
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear,
+                                    address::clamp_to_edge);
+
+  // The blurred copy covers the whole viewport, so sample it by screen
+  // position rather than by a per-quad UV.
+  float2 uv = input.position.xy /
+              float2((float)viewport_size->width, (float)viewport_size->height);
+  float4 backdrop = blurred.sample(texture_sampler, uv);
+
+  // Everything here is premultiplied: `backdrop` because it was sampled from
+  // the premultiplied target, `tint` because we premultiply it now. This pass
+  // REPLACES the region it covers (pipeline blend is One / 1-SrcAlpha), so the
+  // sharp original underneath is not double-counted.
+  float4 tint = float4(input.tint.rgb * input.tint.a, input.tint.a);
+  float4 color = tint + backdrop * (1.0 - tint.a);
+
+  float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
+  float coverage = saturate(0.5 - distance);
+  return color * coverage;
+}

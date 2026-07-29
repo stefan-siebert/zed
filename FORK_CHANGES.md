@@ -36,7 +36,33 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 | `541898a1` | Capture painted text content for the MCP inspector |
 | `78866100` | Deduplicate inspector text content — assign to smallest container |
 
-## 2. Custom shaders / visual effects (largest feature area)
+## 2. Per-element backdrop blur (macOS)
+
+| Commit | Change |
+|---|---|
+| _this commit_ | **`BackdropBlur` primitive + Metal implementation.** GPUI had no backdrop-filter primitive at all: both shader paths (Metal's `quad_fragment` `effect_type` branches and the WGSL `CustomShader` contract) bind no texture, so neither can read what is already painted behind an element. Adds `BackdropBlur` to `Scene` (`bounds`, `content_mask`, `corner_radii`, `blur_radius`, `tint`), `Window::paint_backdrop_blur`, and `PlatformWindow::supports_backdrop_blur` (default `false`). `PrimitiveKind::BackdropBlur` sits **between `Shadow` and `Quad`** so a backdrop at the same draw order paints under the quad that requested it, while every existing kind keeps its relative order. macOS implements it: a dual-Kawase chain (Bjorge, ARM, SIGGRAPH 2015) on a half-resolution ping-pong pair, composited through `quad_sdf` for rounded corners. wgpu and DirectX get a no-op arm and keep reporting `false`. |
+
+Two things this required that are easy to regress:
+
+1. **`layer.set_framebuffer_only(false)` is now unconditional** (`metal_renderer.rs`),
+   previously only under `test-support`. The blur samples the drawable it is
+   rendering into, so the drawable must be readable. Apple defaults this the
+   other way because it forgoes display-path optimisations.
+2. **The composite pipeline must not blend** in the usual source-over sense
+   (`build_path_sprite_pipeline_state`, i.e. `One` / `1-SrcAlpha`). The fragment
+   shader has already composited the blurred destination itself; source-over
+   would count the sharp original twice.
+
+Mechanically it mirrors the existing path rendering: the batch loop ends the
+encoder, runs the blur into scratch textures, and reopens the encoder on the
+same target with `MTLLoadAction::Load`.
+
+**Scope:** the blur reads the window's render target, so it frosts sibling GPUI
+elements — not the desktop, which is never in that target and stays the
+WindowServer's job (see the colorless-blur patch below). The two compose because
+the shader preserves the target's alpha.
+
+## 3. Custom shaders / visual effects (largest feature area)
 
 | Commit | Change |
 |---|---|

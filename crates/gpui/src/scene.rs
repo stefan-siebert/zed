@@ -37,6 +37,7 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     pub custom_shaders: Vec<CustomShaderInstance>,
+    pub backdrop_blurs: Vec<BackdropBlur>,
 }
 
 #[expect(missing_docs)]
@@ -54,6 +55,7 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.custom_shaders.clear();
+        self.backdrop_blurs.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -91,6 +93,10 @@ impl Scene {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
                 self.shadows.push(*shadow);
+            }
+            Primitive::BackdropBlur(blur) => {
+                blur.order = order;
+                self.backdrop_blurs.push(*blur);
             }
             Primitive::Quad(quad) => {
                 quad.order = order;
@@ -154,6 +160,7 @@ impl Scene {
         self.surfaces.sort_by_key(|surface| surface.order);
         self.custom_shaders
             .sort_by_key(|cs| (cs.order, cs.shader_id.0));
+        self.backdrop_blurs.sort_by_key(|blur| blur.order);
     }
 
     #[cfg_attr(
@@ -183,6 +190,8 @@ impl Scene {
             surfaces_iter: self.surfaces.iter().peekable(),
             custom_shaders_start: 0,
             custom_shaders_iter: self.custom_shaders.iter().peekable(),
+            backdrop_blurs_start: 0,
+            backdrop_blurs_iter: self.backdrop_blurs.iter().peekable(),
         }
     }
 }
@@ -197,6 +206,7 @@ impl Scene {
 )]
 pub(crate) enum PrimitiveKind {
     Shadow,
+    BackdropBlur,
     #[default]
     Quad,
     Path,
@@ -218,6 +228,7 @@ pub(crate) enum PaintOperation {
 #[expect(missing_docs)]
 pub enum Primitive {
     Shadow(Shadow),
+    BackdropBlur(BackdropBlur),
     Quad(Quad),
     Path(Path<ScaledPixels>),
     Underline(Underline),
@@ -233,6 +244,7 @@ impl Primitive {
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.bounds,
+            Primitive::BackdropBlur(blur) => &blur.bounds,
             Primitive::Quad(quad) => &quad.bounds,
             Primitive::Path(path) => &path.bounds,
             Primitive::Underline(underline) => &underline.bounds,
@@ -247,6 +259,7 @@ impl Primitive {
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.content_mask,
+            Primitive::BackdropBlur(blur) => &blur.content_mask,
             Primitive::Quad(quad) => &quad.content_mask,
             Primitive::Path(path) => &path.content_mask,
             Primitive::Underline(underline) => &underline.content_mask,
@@ -285,6 +298,8 @@ struct BatchIterator<'a> {
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
     custom_shaders_start: usize,
     custom_shaders_iter: Peekable<slice::Iter<'a, CustomShaderInstance>>,
+    backdrop_blurs_start: usize,
+    backdrop_blurs_iter: Peekable<slice::Iter<'a, BackdropBlur>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -321,6 +336,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.custom_shaders_iter.peek().map(|cs| cs.order),
                 PrimitiveKind::CustomShader,
+            ),
+            (
+                self.backdrop_blurs_iter.peek().map(|b| b.order),
+                PrimitiveKind::BackdropBlur,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -475,8 +494,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 while self
                     .custom_shaders_iter
                     .next_if(|cs| {
-                        (cs.order, batch_kind) < max_order_and_kind
-                            && cs.shader_id == shader_id
+                        (cs.order, batch_kind) < max_order_and_kind && cs.shader_id == shader_id
                     })
                     .is_some()
                 {
@@ -487,6 +505,20 @@ impl<'a> Iterator for BatchIterator<'a> {
                     shader_id,
                     range: start..end,
                 })
+            }
+            PrimitiveKind::BackdropBlur => {
+                let start = self.backdrop_blurs_start;
+                let mut end = start + 1;
+                self.backdrop_blurs_iter.next();
+                while self
+                    .backdrop_blurs_iter
+                    .next_if(|blur| (blur.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    end += 1;
+                }
+                self.backdrop_blurs_start = end;
+                Some(PrimitiveBatch::BackdropBlurs(start..end))
             }
         }
     }
@@ -524,6 +556,7 @@ pub enum PrimitiveBatch {
         shader_id: CustomShaderId,
         range: Range<usize>,
     },
+    BackdropBlurs(Range<usize>),
 }
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -563,6 +596,39 @@ pub struct Underline {
     pub color: Hsla,
     pub thickness: ScaledPixels,
     pub wavy: u32,
+}
+
+/// A rectangle that blurs whatever has already been painted behind it.
+///
+/// Unlike every other primitive this one is a *barrier*: the renderer must
+/// resolve the frame so far before it can be sampled, so a backdrop blur costs
+/// a render-pass split. See the macOS renderer's `draw_backdrop_blurs`.
+///
+/// Field order and padding match `BackdropBlur` in the platform shaders; keep
+/// the two in sync.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct BackdropBlur {
+    /// Draw order (assigned by the scene).
+    pub order: DrawOrder,
+    /// Blur radius in device pixels. `0` disables the blur and leaves a plain
+    /// tinted fill, which is what platforms without a blur implementation do.
+    pub blur_radius: f32,
+    /// Quad bounds in device pixels.
+    pub bounds: Bounds<ScaledPixels>,
+    /// Clip rectangle.
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// Rounded corners; the blurred backdrop is masked to them.
+    pub corner_radii: Corners<ScaledPixels>,
+    /// Tint composited *over* the blurred backdrop, in the usual
+    /// source-over sense: `tint.a == 1` hides the backdrop entirely.
+    pub tint: Hsla,
+}
+
+impl From<BackdropBlur> for Primitive {
+    fn from(blur: BackdropBlur) -> Self {
+        Primitive::BackdropBlur(blur)
+    }
 }
 
 impl From<Underline> for Primitive {

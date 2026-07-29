@@ -2,23 +2,23 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
-    Context, Corners, CursorHideMode, CursorStyle, CustomShaderId, CustomShaderInstance,
+    AsyncWindowContext, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds, BoxShadow,
+    Capslock, Context, Corners, CursorHideMode, CursorStyle, CustomShaderId, CustomShaderInstance,
     Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
     Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId,
-    GlowParams, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent,
-    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, NativeDragIcon,
-    NativeDragMode, NativeDragResult, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
-    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
-    SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
-    TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    point, prelude::*, profiler, px, rems, size, transparent_black,
+    GlowParams, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    NativeDragIcon, NativeDragMode, NativeDragResult, Path, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
+    PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle,
+    Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
+    TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement,
+    ThermalState, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size, transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -3806,6 +3806,45 @@ impl Window {
         });
     }
 
+    /// Whether this platform can blur the frame behind an element
+    /// ([`Self::paint_backdrop_blur`]).
+    ///
+    /// When `false`, `paint_backdrop_blur` still paints — as a plain tinted
+    /// fill — so call sites need no platform branch, but they may want to pick
+    /// a denser tint since nothing will be blurred behind it.
+    pub fn supports_backdrop_blur(&self) -> bool {
+        self.platform_window.supports_backdrop_blur()
+    }
+
+    /// Blur everything already painted behind `bounds`, mask it to
+    /// `corner_radii`, and composite `tint` over the result.
+    ///
+    /// This is the one primitive that reads the frame rather than only adding
+    /// to it, which makes it a barrier: the renderer has to resolve everything
+    /// painted so far before it can sample. Costs a render-pass split plus the
+    /// blur chain, so paint one per glass surface, not one per row.
+    ///
+    /// `blur_radius` is in logical pixels and is scaled with the window.
+    pub fn paint_backdrop_blur(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur_radius: Pixels,
+        tint: Hsla,
+    ) {
+        self.invalidator.debug_assert_paint();
+        let scale_factor = self.scale_factor();
+        let content_mask = self.content_mask();
+        self.next_frame.scene.insert_primitive(BackdropBlur {
+            order: 0,
+            blur_radius: f32::from(blur_radius * scale_factor),
+            bounds: bounds.scale(scale_factor),
+            content_mask: content_mask.scale(scale_factor),
+            corner_radii: corner_radii.scale(scale_factor),
+            tint,
+        });
+    }
+
     /// Register a custom WGSL fragment shader for use with `paint_custom_shader`.
     ///
     /// The shader must define a function:
@@ -3819,7 +3858,8 @@ impl Window {
         wgsl_fragment: &str,
         label: &str,
     ) -> Option<CustomShaderId> {
-        self.platform_window.register_custom_shader(wgsl_fragment, label)
+        self.platform_window
+            .register_custom_shader(wgsl_fragment, label)
     }
 
     /// Paint a custom shader instance into the scene.
@@ -6070,10 +6110,7 @@ impl Window {
             }
 
             if let Some(id) = best_hitbox_id {
-                text_assignments
-                    .entry(id)
-                    .or_default()
-                    .push(text.clone());
+                text_assignments.entry(id).or_default().push(text.clone());
             }
         }
 
@@ -6081,9 +6118,7 @@ impl Window {
         inspector_hitboxes
             .into_iter()
             .map(|(hitbox, inspector_id)| {
-                let text_content = text_assignments
-                    .remove(&hitbox.id)
-                    .unwrap_or_default();
+                let text_content = text_assignments.remove(&hitbox.id).unwrap_or_default();
 
                 InspectorElementInfo {
                     bounds: hitbox.bounds,
@@ -6133,12 +6168,7 @@ impl Window {
     }
 
     /// Dispatches a complete click (mouse down + mouse up) at the given position.
-    pub fn dispatch_click(
-        &mut self,
-        position: Point<Pixels>,
-        button: MouseButton,
-        cx: &mut App,
-    ) {
+    pub fn dispatch_click(&mut self, position: Point<Pixels>, button: MouseButton, cx: &mut App) {
         self.dispatch_mouse_down(position, button, cx);
         self.dispatch_mouse_up(position, button, cx);
     }

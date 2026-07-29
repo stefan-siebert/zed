@@ -1464,6 +1464,10 @@ impl PlatformWindow for MacWindow {
 
     fn set_app_id(&mut self, _app_id: &str) {}
 
+    fn supports_backdrop_blur(&self) -> bool {
+        true
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut this = self.0.as_ref().lock();
         this.background_appearance = background_appearance;
@@ -1776,7 +1780,6 @@ impl PlatformWindow for MacWindow {
     fn play_system_bell(&self) {
         NSBeep();
     }
-
 
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();

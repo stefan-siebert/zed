@@ -1,15 +1,15 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, Background, Bounds, CustomShaderInstance, CustomShaderId, DevicePixels,
+    AtlasTextureId, Background, Bounds, CustomShaderId, CustomShaderInstance, DevicePixels,
     GpuSpecs, MonochromeSprite, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels,
     Scene, Shadow, Size, SubpixelSprite, Underline, get_gamma_correction_ratios,
 };
-use std::collections::HashMap;
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -1337,14 +1337,16 @@ impl WgpuRenderer {
                                 true
                             }
                         }
-                        PrimitiveBatch::CustomShaders { shader_id, range } => {
-                            self.draw_custom_shaders(
+                        // Not implemented on this backend; `supports_backdrop_blur()`
+                        // reports false so call sites fall back to a plain tinted fill.
+                        PrimitiveBatch::BackdropBlurs(_) => true,
+                        PrimitiveBatch::CustomShaders { shader_id, range } => self
+                            .draw_custom_shaders(
                                 &scene.custom_shaders[range],
                                 shader_id,
                                 &mut instance_offset,
                                 &mut pass,
-                            )
-                        }
+                            ),
                     };
                     if !ok {
                         overflow = true;
@@ -1522,15 +1524,16 @@ impl WgpuRenderer {
         }
         let resources = self.resources();
         for surface in surfaces {
-            let texture =
-                match crate::dmabuf_texture::import_dmabuf_texture(&resources.device, &surface.frame)
-                {
-                    Ok(texture) => texture,
-                    Err(err) => {
-                        log::warn!("dmabuf video frame import failed: {err:#}");
-                        continue;
-                    }
-                };
+            let texture = match crate::dmabuf_texture::import_dmabuf_texture(
+                &resources.device,
+                &surface.frame,
+            ) {
+                Ok(texture) => texture,
+                Err(err) => {
+                    log::warn!("dmabuf video frame import failed: {err:#}");
+                    continue;
+                }
+            };
             let luma_view = texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("dmabuf_video_luma"),
                 format: Some(wgpu::TextureFormat::R8Unorm),
@@ -1702,46 +1705,45 @@ impl WgpuRenderer {
                 });
 
         let blend_mode = wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING;
-        let pipeline =
-            resources
-                .device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs_custom"),
-                        buffers: &[],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("fs_custom"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: self.surface_config.format,
-                            blend: Some(blend_mode),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        unclipped_depth: false,
-                        conservative: false,
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState {
-                        count: 1,
-                        mask: !0,
-                        alpha_to_coverage_enabled: false,
-                    },
-                    multiview_mask: None,
-                    cache: None,
-                });
+        let pipeline = resources
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_custom"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_custom"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_config.format,
+                        blend: Some(blend_mode),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            });
 
         self.custom_shader_pipelines.insert(id, pipeline);
         id
@@ -1832,7 +1834,13 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
             return true; // Unknown shader — skip silently
         };
         let data = unsafe { Self::instance_bytes(instances) };
-        self.draw_instances(data, instances.len() as u32, pipeline, instance_offset, pass)
+        self.draw_instances(
+            data,
+            instances.len() as u32,
+            pipeline,
+            instance_offset,
+            pass,
+        )
     }
 
     unsafe fn instance_bytes<T>(instances: &[T]) -> &[u8] {
@@ -2066,7 +2074,6 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
         Ok(())
     }
 
-
     /// Renders the scene to an offscreen texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen.
     pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
@@ -2082,25 +2089,24 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
         let format = self.surface_config.format;
 
         // Create offscreen texture to render into
-        let offscreen_texture =
-            self.resources()
-                .device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("render_to_image_texture"),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                });
-        let offscreen_view =
-            offscreen_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let offscreen_texture = self
+            .resources()
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("render_to_image_texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+        let offscreen_view = offscreen_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Set up globals (same as draw())
         let globals = GlobalParams {
@@ -2122,9 +2128,11 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
 
         {
             let resources = self.resources();
-            resources
-                .queue
-                .write_buffer(&resources.globals_buffer, 0, bytemuck::bytes_of(&globals));
+            resources.queue.write_buffer(
+                &resources.globals_buffer,
+                0,
+                bytemuck::bytes_of(&globals),
+            );
             resources.queue.write_buffer(
                 &resources.globals_buffer,
                 self.path_globals_offset,
@@ -2240,6 +2248,9 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
                                 &mut pass,
                             ),
                         PrimitiveBatch::Surfaces(_) => true,
+                        // Not implemented on this backend; `supports_backdrop_blur()`
+                        // reports false so call sites fall back to a plain tinted fill.
+                        PrimitiveBatch::BackdropBlurs(_) => true,
                         PrimitiveBatch::CustomShaders { shader_id, range } => self
                             .draw_custom_shaders(
                                 &scene.custom_shaders[range],
@@ -2271,15 +2282,15 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
             let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
             let buffer_size = (padded_bytes_per_row * height) as u64;
 
-            let output_buffer =
-                self.resources()
-                    .device
-                    .create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("render_to_image_buffer"),
-                        size: buffer_size,
-                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                        mapped_at_creation: false,
-                    });
+            let output_buffer = self
+                .resources()
+                .device
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("render_to_image_buffer"),
+                    size: buffer_size,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
 
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {

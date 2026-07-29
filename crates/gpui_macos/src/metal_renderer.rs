@@ -7,9 +7,9 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
-    Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
-    Surface, Underline, point, size,
+    AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
+    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
+    Size, Surface, Underline, point, size,
 };
 use image::RgbaImage;
 
@@ -124,6 +124,9 @@ pub(crate) struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
+    backdrop_blur_pipeline_state: metal::RenderPipelineState,
+    kawase_down_pipeline_state: metal::RenderPipelineState,
+    kawase_up_pipeline_state: metal::RenderPipelineState,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -131,6 +134,10 @@ pub(crate) struct MetalRenderer {
     core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
+    /// Half-resolution ping-pong pair for the backdrop-blur chain. Half res
+    /// because a Kawase chain is already a low-pass filter — the detail the
+    /// full-resolution copy would carry is exactly what gets thrown away.
+    backdrop_blur_textures: Option<[metal::Texture; 2]>,
     path_sample_count: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
@@ -158,8 +165,12 @@ impl MetalRenderer {
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
         layer.set_maximum_drawable_count(3);
-        // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
-        #[cfg(any(test, feature = "test-support"))]
+        // The drawable must be readable, not just writable:
+        //   - backdrop blur samples the frame painted so far (see
+        //     `blur_backdrop`), and
+        //   - visual tests capture screenshots without ScreenCaptureKit.
+        // This forgoes some display-path optimisations, which is why Apple
+        // defaults it the other way; both features need it.
         layer.set_framebuffer_only(false);
         unsafe {
             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
@@ -321,6 +332,33 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        // Replaces the region it covers rather than blending onto it: the
+        // shader has already composited the (blurred) destination itself, so
+        // source-over would count the sharp original twice.
+        let backdrop_blur_pipeline_state = build_path_sprite_pipeline_state(
+            &device,
+            &library,
+            "backdrop_blur",
+            "backdrop_blur_vertex",
+            "backdrop_blur_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
+        let kawase_down_pipeline_state = build_blit_pipeline_state(
+            &device,
+            &library,
+            "kawase_down",
+            "kawase_vertex",
+            "kawase_down_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
+        let kawase_up_pipeline_state = build_blit_pipeline_state(
+            &device,
+            &library,
+            "kawase_up",
+            "kawase_vertex",
+            "kawase_up_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
@@ -337,6 +375,9 @@ impl MetalRenderer {
             command_queue,
             paths_rasterization_pipeline_state,
             path_sprites_pipeline_state,
+            backdrop_blur_pipeline_state,
+            kawase_down_pipeline_state,
+            kawase_up_pipeline_state,
             shadows_pipeline_state,
             quads_pipeline_state,
             underlines_pipeline_state,
@@ -349,6 +390,7 @@ impl MetalRenderer {
             core_video_texture_cache,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
+            backdrop_blur_textures: None,
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "test-support"))]
             headless_render_target: None,
@@ -400,6 +442,7 @@ impl MetalRenderer {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             self.path_intermediate_texture = None;
             self.path_intermediate_msaa_texture = None;
+            self.backdrop_blur_textures = None;
             return;
         }
 
@@ -411,6 +454,7 @@ impl MetalRenderer {
         texture_descriptor
             .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
         self.path_intermediate_texture = Some(self.device.new_texture(&texture_descriptor));
+        self.update_backdrop_blur_textures(size);
 
         if self.path_sample_count > 1 {
             // https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus
@@ -928,6 +972,43 @@ impl MetalRenderer {
                 ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
                 PrimitiveBatch::CustomShaders { .. } => true,
+                PrimitiveBatch::BackdropBlurs(range) => {
+                    let blurs = &scene.backdrop_blurs[range];
+                    // A backdrop blur reads the target it is being drawn into,
+                    // so the pass has to be resolved before it can sample.
+                    // Same shape as the Paths arm above; the difference is the
+                    // direction — that one renders *into* an intermediate,
+                    // this one filters the target *out of* it.
+                    command_encoder.end_encoding();
+
+                    let radius = blurs.first().map_or(0., |blur| blur.blur_radius);
+                    let blurred = self
+                        .blur_backdrop(texture, radius, command_buffer)
+                        .map(|blurred| blurred.to_owned());
+
+                    command_encoder = new_command_encoder_for_texture(
+                        command_buffer,
+                        texture,
+                        viewport_size,
+                        |color_attachment| {
+                            color_attachment.set_load_action(metal::MTLLoadAction::Load);
+                        },
+                    );
+
+                    match blurred {
+                        Some(blurred) => self.draw_backdrop_blurs(
+                            blurs,
+                            &blurred,
+                            instance_buffer,
+                            &mut instance_offset,
+                            viewport_size,
+                            command_encoder,
+                        ),
+                        // No scratch textures (zero-sized drawable): skip the
+                        // effect rather than dropping the frame.
+                        None => true,
+                    }
+                }
             };
             if !ok {
                 command_encoder.end_encoding();
@@ -955,6 +1036,187 @@ impl MetalRenderer {
         }
 
         Ok(command_buffer.to_owned())
+    }
+
+    /// (Re)allocate the half-resolution ping-pong pair used by the backdrop
+    /// blur. Called from `update_path_intermediate_textures`, so the pair
+    /// tracks the drawable exactly like the path intermediate does.
+    fn update_backdrop_blur_textures(&mut self, size: Size<DevicePixels>) {
+        let width = (size.width.0 / 2).max(1) as u64;
+        let height = (size.height.0 / 2).max(1) as u64;
+
+        let make = || {
+            let descriptor = metal::TextureDescriptor::new();
+            descriptor.set_width(width);
+            descriptor.set_height(height);
+            descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+            descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+            descriptor.set_usage(
+                metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+            );
+            self.device.new_texture(&descriptor)
+        };
+        self.backdrop_blur_textures = Some([make(), make()]);
+    }
+
+    /// Run one dual-Kawase pass from `source` into `target`.
+    fn kawase_pass(
+        &self,
+        pipeline: &metal::RenderPipelineStateRef,
+        source: &metal::TextureRef,
+        target: &metal::TextureRef,
+        texel: [f32; 2],
+        offset: f32,
+        command_buffer: &metal::CommandBufferRef,
+    ) {
+        let descriptor = metal::RenderPassDescriptor::new();
+        let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+        color_attachment.set_texture(Some(target));
+        // Every texel is written by the fullscreen triangle pair, so the
+        // previous contents are irrelevant — and not loading them saves the
+        // tile-memory fill on Apple GPUs.
+        color_attachment.set_load_action(metal::MTLLoadAction::DontCare);
+        color_attachment.set_store_action(metal::MTLStoreAction::Store);
+
+        let encoder = command_buffer.new_render_command_encoder(descriptor);
+        encoder.set_render_pipeline_state(pipeline);
+        encoder.set_viewport(metal::MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: target.width() as f64,
+            height: target.height() as f64,
+            znear: 0.0,
+            zfar: 1.0,
+        });
+        encoder.set_vertex_buffer(
+            KawaseInputIndex::Vertices as u64,
+            Some(&self.unit_vertices),
+            0,
+        );
+        let params = KawaseParams {
+            texel,
+            offset,
+            _pad: 0.0,
+        };
+        encoder.set_fragment_bytes(
+            KawaseInputIndex::Params as u64,
+            mem::size_of::<KawaseParams>() as u64,
+            &params as *const KawaseParams as *const _,
+        );
+        encoder.set_fragment_texture(KawaseInputIndex::SourceTexture as u64, Some(source));
+        encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 6);
+        encoder.end_encoding();
+    }
+
+    /// Blur the frame painted so far into the scratch chain and return the
+    /// texture holding the result.
+    ///
+    /// Must be called with no render encoder open on `source`: this samples
+    /// the very target the scene is being drawn into, so those writes have to
+    /// be resolved first. The caller reopens its encoder with
+    /// `MTLLoadAction::Load` afterwards.
+    fn blur_backdrop(
+        &self,
+        source: &metal::TextureRef,
+        blur_radius: f32,
+        command_buffer: &metal::CommandBufferRef,
+    ) -> Option<&metal::Texture> {
+        let textures = self.backdrop_blur_textures.as_ref()?;
+        let (half_width, half_height) = (textures[0].width(), textures[0].height());
+        if source.width() == 0 || source.height() == 0 {
+            return None;
+        }
+
+        // Downsample the full-resolution target into half res.
+        self.kawase_pass(
+            &self.kawase_down_pipeline_state,
+            source,
+            &textures[0],
+            [1.0 / source.width() as f32, 1.0 / source.height() as f32],
+            1.0,
+            command_buffer,
+        );
+
+        // Then ping-pong at half res with a growing offset.
+        let half_texel = [1.0 / half_width as f32, 1.0 / half_height as f32];
+        let mut read = 0usize;
+        for offset in kawase_offsets(blur_radius * 0.5) {
+            let write = 1 - read;
+            self.kawase_pass(
+                &self.kawase_up_pipeline_state,
+                &textures[read],
+                &textures[write],
+                half_texel,
+                offset,
+                command_buffer,
+            );
+            read = write;
+        }
+        Some(&textures[read])
+    }
+
+    fn draw_backdrop_blurs(
+        &self,
+        blurs: &[BackdropBlur],
+        blurred: &metal::TextureRef,
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) -> bool {
+        if blurs.is_empty() {
+            return true;
+        }
+        align_offset(instance_offset);
+
+        command_encoder.set_render_pipeline_state(&self.backdrop_blur_pipeline_state);
+        command_encoder.set_vertex_buffer(
+            BackdropBlurInputIndex::Vertices as u64,
+            Some(&self.unit_vertices),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            BackdropBlurInputIndex::BackdropBlurs as u64,
+            Some(&instance_buffer.metal_buffer),
+            *instance_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            BackdropBlurInputIndex::BackdropBlurs as u64,
+            Some(&instance_buffer.metal_buffer),
+            *instance_offset as u64,
+        );
+        command_encoder.set_vertex_bytes(
+            BackdropBlurInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_fragment_bytes(
+            BackdropBlurInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder
+            .set_fragment_texture(BackdropBlurInputIndex::BlurredTexture as u64, Some(blurred));
+
+        let bytes_len = mem::size_of_val(blurs);
+        let next_offset = *instance_offset + bytes_len;
+        if next_offset > instance_buffer.size {
+            return false;
+        }
+        let buffer_contents =
+            unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
+        unsafe {
+            ptr::copy_nonoverlapping(blurs.as_ptr() as *const u8, buffer_contents, bytes_len);
+        }
+
+        command_encoder.draw_primitives_instanced(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6,
+            blurs.len() as u64,
+        );
+        *instance_offset = next_offset;
+        true
     }
 
     fn draw_paths_to_intermediate(
@@ -1627,6 +1889,56 @@ fn build_pipeline_state(
         .expect("could not create render pipeline state")
 }
 
+/// Pipeline that writes its fragment output verbatim — no blending.
+///
+/// The Kawase passes render a filtered *copy* into a scratch texture; blending
+/// them onto whatever the scratch texture held last frame would smear frames
+/// together.
+/// Tap offsets, in half-resolution texels, for a Kawase chain approximating a
+/// Gaussian of `radius_half_res`.
+///
+/// Each pass adds roughly its own offset to the total reach, so a handful of
+/// growing offsets covers a wide radius at a fraction of what a separable
+/// Gaussian of the same width would cost. Capped at five passes: past that the
+/// chain costs more than it visibly improves.
+fn kawase_offsets(radius_half_res: f32) -> Vec<f32> {
+    if !(radius_half_res > 0.5) {
+        return Vec::new();
+    }
+    let count = (radius_half_res.sqrt().round() as usize).clamp(1, 5);
+    // Offsets (i + 0.5) * scale sum to `radius_half_res`.
+    let scale = 2.0 * radius_half_res / (count * count) as f32;
+    (0..count).map(|i| (i as f32 + 0.5) * scale).collect()
+}
+
+fn build_blit_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function(vertex_fn_name, None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(pixel_format);
+    color_attachment.set_blending_enabled(false);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
 fn build_path_sprite_pipeline_state(
     device: &metal::DeviceRef,
     library: &metal::LibraryRef,
@@ -1717,6 +2029,32 @@ enum QuadInputIndex {
     Vertices = 0,
     Quads = 1,
     ViewportSize = 2,
+}
+
+#[repr(C)]
+enum BackdropBlurInputIndex {
+    Vertices = 0,
+    BackdropBlurs = 1,
+    ViewportSize = 2,
+    BlurredTexture = 3,
+}
+
+#[repr(C)]
+enum KawaseInputIndex {
+    Vertices = 0,
+    Params = 1,
+    SourceTexture = 2,
+}
+
+/// Uniforms for one dual-Kawase pass. Mirrored in `shaders.metal`.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct KawaseParams {
+    /// 1 / source texture size, so `offset` can be expressed in texels.
+    pub texel: [f32; 2],
+    /// Tap offset in source texels.
+    pub offset: f32,
+    pub _pad: f32,
 }
 
 #[repr(C)]
