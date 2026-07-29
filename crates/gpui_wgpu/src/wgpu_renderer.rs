@@ -2108,10 +2108,24 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
             });
         let offscreen_view = offscreen_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Set up globals (same as draw())
+        // Set up globals (same as draw()). `premultiplied_alpha` MUST match
+        // the blend convention baked into the shared pipelines at creation
+        // (PreMultiplied surface → PREMULTIPLIED_ALPHA_BLENDING): the flag
+        // tells the shaders whether to premultiply their output. Hardcoding 0
+        // here while the pipelines blend premultiplied made every translucent
+        // fragment (glyph coverage edges, panels, scrims, shadows) add
+        // un-premultiplied RGB — the whole offscreen frame washed out toward
+        // white, which is why inspector screenshots looked bleached while the
+        // live surface was correct.
         let globals = GlobalParams {
             viewport_size: [width as f32, height as f32],
-            premultiplied_alpha: 0,
+            premultiplied_alpha: if self.surface_config.alpha_mode
+                == wgpu::CompositeAlphaMode::PreMultiplied
+            {
+                1
+            } else {
+                0
+            },
             pad: 0,
         };
         let path_globals = GlobalParams {

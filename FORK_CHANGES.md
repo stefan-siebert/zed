@@ -101,6 +101,7 @@ frame). Both must survive upstream merges:
 | `a820fc97` | `render_to_image` for Windows DirectX renderer |
 | `d8d06683` | `render_to_image` for wgpu renderer (Linux screenshot support) |
 | `c4724161` | Ungate `render_to_image` on macOS + clean stale `NSBeep` unsafe |
+| `655b9091` | wgpu `render_to_image`: derive `premultiplied_alpha` from the surface alpha mode like `draw()` — the hardcoded 0 fed straight-alpha shader output into premultiplied-blending pipelines and bleached the whole offscreen frame toward white on PreMultiplied surfaces (inspector screenshots looked washed out while the live window was correct) |
 
 ## 4. Native drag-and-drop
 
