@@ -1335,13 +1335,18 @@ struct FullscreenVertexOutput {
 
 vertex FullscreenVertexOutput kawase_vertex(
     uint unit_vertex_id [[vertex_id]],
-    constant float2 *unit_vertices [[buffer(KawaseInputIndex_Vertices)]]) {
+    constant float2 *unit_vertices [[buffer(KawaseInputIndex_Vertices)]],
+    constant KawaseParams *params [[buffer(KawaseInputIndex_Params)]]) {
   float2 unit_vertex = unit_vertices[unit_vertex_id];
+  // Shade only the region the frame's blur rects need, not the whole target.
+  // `origin`/`size` are C arrays in the generated header, hence the indexing.
+  float2 origin = float2(params->origin[0], params->origin[1]);
+  float2 extent = float2(params->size[0], params->size[1]);
+  float2 uv = origin + unit_vertex * extent;
   FullscreenVertexOutput output;
   // Unit square -> clip space, y flipped to match GPUI's top-left origin.
-  output.position =
-      float4(unit_vertex * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
-  output.uv = unit_vertex;
+  output.position = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+  output.uv = uv;
   return output;
 }
 

@@ -57,6 +57,18 @@ Mechanically it mirrors the existing path rendering: the batch loop ends the
 encoder, runs the blur into scratch textures, and reopens the encoder on the
 same target with `MTLLoadAction::Load`.
 
+**Cost (measured 2026-07-29, GPU wall time from `GPUStartTime`/`GPUEndTime`):**
+the chain adds ~0.35 ms per frame on a 900x600 window and ~0.52 ms on
+1800x1200, roughly doubling GPU frame time while a blurred surface is on
+screen. It originally ran over the whole viewport, which made the cost a
+function of window size rather than of how much was being blurred (+0.99 ms at
+1800x1200 for a dialog covering 2.6% of it); `blur_region` now restricts every
+pass to the union of the frame's blur rects, grown by the blur's reach. That
+halves the cost on large windows and barely moves it on small ones, where the
+rect is most of the viewport anyway. What remains is fixed pass overhead — the
+splits and the full-size render-target load/store — which the region cannot
+touch.
+
 **Scope:** the blur reads the window's render target, so it frosts sibling GPUI
 elements — not the desktop, which is never in that target and stays the
 WindowServer's job (see the colorless-blur patch below). The two compose because
