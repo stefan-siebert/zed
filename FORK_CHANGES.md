@@ -2,7 +2,7 @@
 
 **Fork:** `stefan-siebert/zed`, branch `gpui-mcp-patches-v2`
 **Built from:** local checkout `../gpui-fork` (overrides the git dep via Cargo `[patch]` in Elane's `Cargo.toml`).
-**Baseline:** upstream Zed merged at commit `832c17e8` (`Merge remote-tracking branch 'upstream/main'`).
+**Baseline:** upstream Zed merged at commit `20ce54f8` (merge commit `0998e6f5`, 2026-08-04).
 
 This file inventories the **custom commits on top of upstream**. Everything else on the branch is upstream PRs pulled in by merges.
 
@@ -11,9 +11,9 @@ This file inventories the **custom commits on top of upstream**. Everything else
 ```bash
 cd ../gpui-fork
 # Custom (non-PR-numbered) commits vs the fork mirror:
-git log --oneline --no-merges origin/main..gpui-mcp-patches-v2 | grep -vE '\(#[0-9]+\)$'
+git log --oneline --no-merges $(git merge-base HEAD upstream/main)..gpui-mcp-patches-v2
 # Net diff of all custom patches vs the upstream merge point:
-git diff --stat 832c17e8..gpui-mcp-patches-v2
+git diff --stat $(git merge-base HEAD upstream/main)..gpui-mcp-patches-v2
 ```
 
 Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style without a PR number.
@@ -22,7 +22,12 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 
 ## Summary
 
-**36 custom commits**, net **+3,537 / −186 lines across 43 files** vs the upstream merge point.
+**54 custom commits**, net **+5,975 / −361 lines across 63 files** vs the upstream merge point (`20ce54f8`, measured 2026-08-04).
+
+Both figures come straight from the commands above; re-run them after every
+upstream merge, and move the baseline commit with them. Counting against
+`origin/main` (the fork mirror) instead of the merge base silently folds in
+upstream commits that carry no PR number.
 
 ⚠️ These forks are load-bearing (see Elane `CLAUDE.md`). `cargo update` against upstream will break the shader, inspector, drag, and clipboard work.
 
@@ -121,6 +126,7 @@ frame). Both must survive upstream merges:
 |---|---|
 | `c9833333` | Native drag-and-drop for Linux/Wayland |
 | `0d9e0d0c` | Windows native drag image DPI scaling + cursor offset sync |
+| `0998e6f5` | **Kept alongside upstream's own outbound-drag support.** The 2026-08-04 merge brought `c7aea6cbb` (`wl_data_source` outbound drags), `f52fd9ac4` (macOS file drag-out) and the `AnyDrag::external_payload_source` / `Interactivity::external_drag_payload` API. That path promotes an internal drag automatically when the pointer leaves the viewport, but hands the platform only `FileDragPaths` — the drag image is the platform's. Ours (`Window::start_native_drag` + `AnyDrag::is_external`) lets the caller pass a rendered icon, which Elane's file table uses (`file_table.rs`: `render_drag_icon` + `NativeDragMode`). Both are live; on Wayland they are separated by a third dispatch userdata, `DataSourceKind::NativeDrag`, so `wl_data_source` events route to the right one without comparing object ids. **If Elane ever gives up the custom drag image, delete our half and use upstream's — carrying both is the cost of that image.** |
 | `7080cc83` | Suppress unused `Result` warning for `SetForegroundWindow` |
 
 New file: `gpui_windows/src/native_drag.rs` (+522).
