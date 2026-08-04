@@ -51,15 +51,21 @@ pub(crate) struct Callbacks {
     close: Option<Box<dyn FnOnce()>>,
     appearance_changed: Option<Box<dyn FnMut()>>,
     button_layout_changed: Option<Box<dyn FnMut()>>,
-    /// Set once `WaylandWindowStatePtr::close` runs.  Late-arriving
-    /// compositor events (pointer motion, focus change, etc.) that
-    /// were already in the calloop queue when we removed the window
-    /// would otherwise call `AnyWindowHandle::update` on a map entry
-    /// that no longer exists, producing a spurious `ERROR gpui::window:
-    /// window not found` backtrace.  Handle_input and peers guard on
-    /// this flag and silently drop the event — the window is gone and
-    /// has nowhere to forward it.  Mirrors the Windows fix at
-    /// gpui_windows/src/window.rs (commit 0f4c1776d0).
+    /// Set once the window is gone from GPUI's map — by
+    /// `WaylandWindowStatePtr::close` (compositor-initiated close) or by
+    /// `WaylandWindow::drop` (GPUI-initiated `Window::remove_window`,
+    /// which is how every secondary window closes).  Late-arriving
+    /// compositor events (the pending frame callback, pointer motion,
+    /// focus change, etc.) that were already in the calloop queue when
+    /// we removed the window would otherwise call
+    /// `AnyWindowHandle::update` on a map entry that no longer exists,
+    /// producing a spurious `ERROR gpui::window: window not found`
+    /// backtrace.  Every site that dispatches one of the callbacks
+    /// above guards on this flag — via an early return, or by taking
+    /// the callback through `take_callback` — and silently drops the
+    /// event; the window is gone and has nowhere to forward it.
+    /// Mirrors the Windows fix at gpui_windows/src/window.rs
+    /// (commit 0f4c1776d0).
     closed: bool,
 }
 
@@ -475,6 +481,17 @@ pub enum ImeInput {
 
 impl Drop for WaylandWindow {
     fn drop(&mut self) {
+        // Mark the window closed NOW, not in the deferred `close()` below.
+        // GPUI drops us as soon as `Window::remove_window` takes the entry
+        // out of `App`'s map — which is how every secondary window closes
+        // (Escape in the preview/editor/search window, say), without the
+        // platform's close path ever running. The window stays in the
+        // client's surface map until the spawned task lands, so compositor
+        // events already queued in calloop — reliably the pending frame
+        // callback — are still routed here in between and would dispatch
+        // into a window GPUI no longer has. See `Callbacks::closed`.
+        self.0.callbacks.borrow_mut().closed = true;
+
         let mut state = self.0.state.borrow_mut();
         let surface_id = state.surface.id();
         if let Some(parent) = state.parent.as_ref() {
@@ -606,7 +623,29 @@ impl WaylandWindowStatePtr {
         !state.children.is_empty()
     }
 
+    /// Take a registered callback out of `Callbacks` for dispatch, or
+    /// `None` once the window has been closed — see `Callbacks::closed`.
+    /// Callers put the callback back after invoking it, so that it can
+    /// re-enter this window while it runs.
+    fn take_callback<T>(&self, take: impl FnOnce(&mut Callbacks) -> Option<T>) -> Option<T> {
+        let mut callbacks = self.callbacks.borrow_mut();
+        if callbacks.closed {
+            return None;
+        }
+        take(&mut callbacks)
+    }
+
     pub fn frame(&self) {
+        // The frame callback for the last committed surface still lands
+        // after the window left GPUI's map — one is essentially always in
+        // flight when a window closes. thermal_state/present/complete_frame
+        // would each fail with `window not found`, three backtraces per
+        // close. Bail before re-arming `surface.frame()` too: the surface
+        // is already destroyed and nothing will draw again.
+        if self.callbacks.borrow().closed {
+            return;
+        }
+
         let mut state = self.state.borrow_mut();
         state.surface.frame(&state.globals.qh, state.surface.id());
         state.resize_throttle = false;
@@ -664,9 +703,10 @@ impl WaylandWindowStatePtr {
                     state.window_controls = window_controls;
 
                     drop(state);
-                    let mut callbacks = self.callbacks.borrow_mut();
-                    if let Some(appearance_changed) = callbacks.appearance_changed.as_mut() {
-                        appearance_changed();
+                    let callback = self.take_callback(|cb| cb.appearance_changed.take());
+                    if let Some(mut fun) = callback {
+                        fun();
+                        self.callbacks.borrow_mut().appearance_changed = Some(fun);
                     }
                 }
             }
@@ -751,7 +791,7 @@ impl WaylandWindowStatePtr {
             match mode {
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide) => {
                     self.state.borrow_mut().decorations = WindowDecorations::Server;
-                    let callback = self.callbacks.borrow_mut().appearance_changed.take();
+                    let callback = self.take_callback(|cb| cb.appearance_changed.take());
                     if let Some(mut fun) = callback {
                         fun();
                         self.callbacks.borrow_mut().appearance_changed = Some(fun);
@@ -760,7 +800,7 @@ impl WaylandWindowStatePtr {
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ClientSide) => {
                     self.state.borrow_mut().decorations = WindowDecorations::Client;
                     // Update background to be transparent
-                    let callback = self.callbacks.borrow_mut().appearance_changed.take();
+                    let callback = self.take_callback(|cb| cb.appearance_changed.take());
                     if let Some(mut fun) = callback {
                         fun();
                         self.callbacks.borrow_mut().appearance_changed = Some(fun);
@@ -1057,7 +1097,7 @@ impl WaylandWindowStatePtr {
             (state.bounds.size, state.scale)
         };
 
-        let callback = self.callbacks.borrow_mut().resize.take();
+        let callback = self.take_callback(|cb| cb.resize.take());
         if let Some(mut fun) = callback {
             fun(size, scale);
             self.callbacks.borrow_mut().resize = Some(fun);
@@ -1138,7 +1178,7 @@ impl WaylandWindowStatePtr {
 
     pub fn set_focused(&self, focus: bool) {
         self.state.borrow_mut().active = focus;
-        let callback = self.callbacks.borrow_mut().active_status_change.take();
+        let callback = self.take_callback(|cb| cb.active_status_change.take());
         if let Some(mut fun) = callback {
             fun(focus);
             self.callbacks.borrow_mut().active_status_change = Some(fun);
@@ -1149,7 +1189,7 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn set_hovered(&self, focus: bool) {
-        let callback = self.callbacks.borrow_mut().hover_status_change.take();
+        let callback = self.take_callback(|cb| cb.hover_status_change.take());
         if let Some(mut fun) = callback {
             fun(focus);
             self.callbacks.borrow_mut().hover_status_change = Some(fun);
@@ -1159,7 +1199,7 @@ impl WaylandWindowStatePtr {
     pub fn set_appearance(&mut self, appearance: WindowAppearance) {
         self.state.borrow_mut().appearance = appearance;
 
-        let callback = self.callbacks.borrow_mut().appearance_changed.take();
+        let callback = self.take_callback(|cb| cb.appearance_changed.take());
         if let Some(mut fun) = callback {
             fun();
             self.callbacks.borrow_mut().appearance_changed = Some(fun);
@@ -1167,7 +1207,7 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn set_button_layout(&self) {
-        let callback = self.callbacks.borrow_mut().button_layout_changed.take();
+        let callback = self.take_callback(|cb| cb.button_layout_changed.take());
         if let Some(mut fun) = callback {
             fun();
             self.callbacks.borrow_mut().button_layout_changed = Some(fun);
