@@ -791,13 +791,15 @@ impl MetalRenderer {
                         .blur_backdrop(texture, blurs, radius, command_buffer)
                         .map(|blurred| blurred.to_owned());
 
+                    // `None` = keep what the pass already painted
+                    // (`MTLLoadAction::Load`), the same resume the Paths arm
+                    // above needs. Clearing here would throw away everything
+                    // drawn before the blur.
                     command_encoder = new_command_encoder_for_texture(
                         command_buffer,
                         texture,
                         viewport_size,
-                        |color_attachment| {
-                            color_attachment.set_load_action(metal::MTLLoadAction::Load);
-                        },
+                        None,
                     );
 
                     // No scratch textures (zero-sized drawable): skip the
@@ -1497,7 +1499,9 @@ fn new_command_encoder_for_texture<'a>(
     command_encoder
 }
 
-#[cfg(any(test, feature = "test-support"))]
+// Not gated on `test-support`, unlike upstream: `render_to_image` above is
+// ungated in this fork (commit c4724161) so the inspector can screenshot a
+// live window, and it reads its pixels back through here.
 fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
     let width = texture.width() as u32;
     let height = texture.height() as u32;

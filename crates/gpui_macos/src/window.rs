@@ -117,6 +117,17 @@ pub enum UserTabbingPreference {
     InFullScreen,
 }
 
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    // Widely used private APIs; Apple uses them for their Terminal.app.
+    fn CGSMainConnectionID() -> id;
+    fn CGSSetWindowBackgroundBlurRadius(
+        connection_id: id,
+        window_id: NSInteger,
+        radius: i64,
+    ) -> i32;
+}
+
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {
     // AppKit constant naming the icon component of an NSDraggingImageComponent.
