@@ -995,11 +995,19 @@ impl MetalRenderer {
         command_encoder
             .set_fragment_texture(BackdropBlurInputIndex::BlurredTexture as u64, Some(blurred));
 
-        command_encoder.draw_primitives_instanced(
+        // The buffer is bound at the base of the whole `scene.backdrop_blurs`
+        // array (like every other primitive type since the 2026-08-04 merge),
+        // so the batch must start at its range offset. Plain
+        // `draw_primitives_instanced` re-drew instance 0 for every batch: with
+        // two glass surfaces open (dropdown + flyout), the second batch painted
+        // the first surface's bounds/tint again — a flickering, wrongly
+        // coloured rectangle.
+        command_encoder.draw_primitives_instanced_base_instance(
             metal::MTLPrimitiveType::Triangle,
             0,
             6,
             blurs.len() as u64,
+            blurs.start as u64,
         );
     }
 
