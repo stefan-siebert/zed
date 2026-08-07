@@ -876,7 +876,6 @@ impl DirectXRenderer {
             return Ok(());
         }
         let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
 
         // The cache only grows while distinct producers are alive; a video
         // preview uses a small texture ring. Reset it when something leaks
@@ -935,8 +934,6 @@ impl DirectXRenderer {
                     self.pipelines.surface_pipeline.draw_with_texture(
                         &devices.device_context,
                         slice::from_ref(&opened.srv),
-                        slice::from_ref(&resources.viewport),
-                        slice::from_ref(&self.globals.global_params_buffer),
                         slice::from_ref(&self.globals.sampler),
                         1,
                     )
