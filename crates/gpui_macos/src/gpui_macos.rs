@@ -16,6 +16,7 @@ mod system_notifications;
 mod screen_capture;
 
 mod metal_atlas;
+mod metal_custom_shader;
 pub mod metal_renderer;
 
 use metal_renderer as renderer;

@@ -11,8 +11,7 @@ use cocoa::{
         NSApplication, NSBackingStoreBuffered, NSColor, NSEvent, NSEventModifierFlags, NSEventType,
         NSFilenamesPboardType, NSPasteboard, NSRequestUserAttentionType, NSScreen, NSView,
         NSViewHeightSizable, NSViewWidthSizable, NSWindow, NSWindowCollectionBehavior,
-        NSWindowOcclusionState,
-        NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+        NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
     },
     base::{id, nil},
     foundation::{
@@ -1759,6 +1758,17 @@ impl PlatformWindow for MacWindow {
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.lock().renderer.sprite_atlas().clone()
+    }
+
+    fn register_custom_shader(
+        &self,
+        wgsl_fragment: &str,
+        label: &str,
+    ) -> Option<gpui::CustomShaderId> {
+        self.0
+            .lock()
+            .renderer
+            .register_custom_shader(wgsl_fragment, label)
     }
 
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {

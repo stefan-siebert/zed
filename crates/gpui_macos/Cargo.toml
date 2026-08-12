@@ -51,6 +51,11 @@ log.workspace = true
 mach2.workspace = true
 media.workspace = true
 metal.workspace = true
+# Custom-shader support translates caller-supplied WGSL to MSL at runtime
+# (metal_custom_shader.rs). Spelled out rather than inherited from the workspace
+# entry so a macOS build doesn't also compile the HLSL backend that entry
+# carries for gpui_windows.
+naga = { version = "29.0", features = ["wgsl-in", "msl-out"] }
 objc.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true

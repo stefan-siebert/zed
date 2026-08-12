@@ -92,9 +92,10 @@ the shader preserves the target's alpha.
 | `f4828a22` | Restore `CustomShaders` arm in macOS metal renderer match |
 | `7b4ffb22` | Fix Point/Size field access in vignette & shimmer effects |
 | `ec534b9e` | Custom-shader instances: clear per frame + 16-byte instance stride |
+| _this commit_ | **Metal runtime for custom shaders (macOS).** The last backend without one: `register_custom_shader` returned `None` on macOS, so no `PrimitiveBatch::CustomShaders` was ever produced and the match arm was an empty `{}`. Elane's treemap cushions and its About-dialog backdrop therefore ran on the flat-fill fallback on the fork's own development platform. New `gpui_macos/src/metal_custom_shader.rs` mirrors `directx_custom_shader.rs`: the caller's `custom_effect` fragment is wrapped in the same WGSL module the other two backends use, translated to MSL with `naga` (new dependency, `wgsl-in` + `msl-out`), compiled through `newLibraryWithSource:`, and cached per `CustomShaderId`. Instances ride the existing per-frame instance buffer; a batch binds the whole array and passes `range.start` as the base instance, since Metal's `[[instance_id]]` counts from it. Blending is premultiplied, matching wgpu/DirectX rather than gpui's own straight-alpha pipelines. Three things to preserve across merges: naga demands a `sizes_buffer` for *any* runtime-sized array whatever the bounds-check policy says, so `_mslBufferSizes` is bound at `buffer(3)`; the quad is a four-vertex triangle strip derived from `[[vertex_id]]`, so this is the one pipeline here that binds no vertex buffer; and the module carries three headless pixel tests, one of which fails if the base instance is dropped. |
 | `0f18336c` | **Text glow on macOS.** `gpui_macos`'s CoreGraphics rasterizer ignored `RenderGlyphParams::embolden`, so glow glyphs rasterized as plain sharp glyphs painted underneath the foreground pass — fully occluded, i.e. `text_glow()` silently did nothing on macOS (Elane titlebar wordmark). The mask-space glow post-processing (`glow_padding_pixels` / `embolden_alpha_mask` / `blur_alpha_mask`), previously duplicated across `gpui_windows/direct_write.rs` and `gpui_wgpu/cosmic_text_system.rs`, moved to shared `gpui/src/text_system/glow_mask.rs` (+ unit tests); both backends now import it and `gpui_macos/text_system.rs` applies it (padded `raster_bounds`, dilate + blur on the CG alpha mask, emoji path skipped). Also: `gpui`'s dev-dependency on `gpui_platform` now enables `runtime_shaders` so `cargo test -p gpui` builds on macOS without the Xcode Metal Toolchain component. |
 
-New/large files: `gpui_windows/src/directx_custom_shader.rs` (+419), `gpui_wgpu/src/wgpu_renderer.rs` (+464), `shaders.wgsl`, `shaders.metal`.
+New/large files: `gpui_windows/src/directx_custom_shader.rs` (+419), `gpui_macos/src/metal_custom_shader.rs` (+500), `gpui_wgpu/src/wgpu_renderer.rs` (+464), `shaders.wgsl`, `shaders.metal`.
 
 **`ec534b9e` — two bugs surfaced by the first heavy real use of custom shaders**
 (Elane's disk-usage treemap, which emits hundreds of custom-shader quads per
@@ -215,7 +216,7 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 - **Windows** (`gpui_windows`): drag, custom shaders, DirectWrite, keyboard, clipboard, events — the heaviest-patched backend
 - **Linux** (`gpui_linux`): Wayland client/window/clipboard, X11 — drag-and-drop and resize fixes
 - **wgpu** (`gpui_wgpu`): renderer + shaders + cosmic text — Linux shader/screenshot support
-- **macOS** (`gpui_macos`): metal renderer, pasteboard, shaders
+- **macOS** (`gpui_macos`): metal renderer, pasteboard, shaders, custom-shader runtime
 - **Web** (`gpui_web`): custom shader support
 
 ---

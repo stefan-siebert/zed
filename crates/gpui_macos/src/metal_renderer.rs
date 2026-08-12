@@ -1,4 +1,7 @@
 use crate::metal_atlas::MetalAtlas;
+use crate::metal_custom_shader::{
+    CustomShaderGlobals, CustomShaderInputIndex, CustomShaderResources,
+};
 use anyhow::{Context as _, Result};
 use block::ConcreteBlock;
 use cocoa::{
@@ -7,8 +10,8 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, PaintSurface,
-    Path, Point, PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, CustomShaderId, DevicePixels,
+    PaintSurface, Path, Point, PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
 use image::RgbaImage;
 
@@ -139,6 +142,9 @@ pub(crate) struct MetalRenderer {
     /// because a Kawase chain is already a low-pass filter — the detail the
     /// full-resolution copy would carry is exactly what gets thrown away.
     backdrop_blur_textures: Option<[metal::Texture; 2]>,
+    /// Pipelines compiled from caller-provided WGSL, see `metal_custom_shader`.
+    /// Empty until someone calls `register_custom_shader`.
+    custom_shaders: CustomShaderResources,
     path_sample_count: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
@@ -392,6 +398,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             backdrop_blur_textures: None,
+            custom_shaders: CustomShaderResources::new(),
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "test-support"))]
             headless_render_target: None,
@@ -411,6 +418,32 @@ impl MetalRenderer {
 
     pub fn sprite_atlas(&self) -> &Arc<MetalAtlas> {
         &self.sprite_atlas
+    }
+
+    /// Compile a custom fragment shader and return the handle to paint with.
+    ///
+    /// `None` on failure (bad WGSL, MSL compile error) — the caller is expected
+    /// to fall back to plain primitives, which is also what backends without
+    /// custom-shader support return. The reason is logged; returning a `Result`
+    /// here would only make every call site log the same line itself, since
+    /// `PlatformWindow::register_custom_shader` is `Option`-shaped.
+    pub fn register_custom_shader(
+        &mut self,
+        wgsl_fragment: &str,
+        label: &str,
+    ) -> Option<CustomShaderId> {
+        match self.custom_shaders.register(
+            &self.device,
+            MTLPixelFormat::BGRA8Unorm,
+            wgsl_fragment,
+            label,
+        ) {
+            Ok(id) => Some(id),
+            Err(error) => {
+                log::error!("failed to register custom shader '{label}': {error:#}");
+                None
+            }
+        }
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
@@ -774,9 +807,14 @@ impl MetalRenderer {
                     command_encoder,
                 ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
-                // Not implemented on Metal; `register_custom_shader` returns
-                // None there, so no CustomShaders batch is ever produced.
-                PrimitiveBatch::CustomShaders { .. } => {}
+                PrimitiveBatch::CustomShaders { shader_id, range } => self.draw_custom_shaders(
+                    shader_id,
+                    range,
+                    scene.custom_shaders.len(),
+                    instance_bindings,
+                    viewport_size,
+                    command_encoder,
+                ),
                 PrimitiveBatch::BackdropBlurs(range) => {
                     let blurs = &scene.backdrop_blurs[range.clone()];
                     // A backdrop blur reads the target it is being drawn into,
@@ -1162,6 +1200,89 @@ impl MetalRenderer {
             6,
             quads.len() as u64,
             quads.start as u64,
+        );
+    }
+
+    /// Draw one batch of custom-shader quads.
+    ///
+    /// Unlike the built-in pipelines this one binds no vertex buffer: the WGSL
+    /// template builds its unit quad from `[[vertex_id]]` as a four-vertex
+    /// triangle strip, so the geometry is the same shape the wgpu and DirectX
+    /// backends draw for the identical shader source.
+    ///
+    /// An unknown `shader_id` is skipped rather than reported: it can only come
+    /// from a handle this renderer never issued, and dropping the frame over a
+    /// decorative primitive would be the worse failure.
+    fn draw_custom_shaders(
+        &self,
+        shader_id: CustomShaderId,
+        range: Range<usize>,
+        instance_count: usize,
+        instance_bindings: &InstanceBindings,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) {
+        if range.is_empty() {
+            return;
+        }
+        let Some(pipeline) = self.custom_shaders.pipeline(shader_id) else {
+            return;
+        };
+
+        let globals = CustomShaderGlobals {
+            viewport_size: [
+                i32::from(viewport_size.width) as f32,
+                i32::from(viewport_size.height) as f32,
+            ],
+        };
+        // naga's `_mslBufferSizes`, in bytes, for the whole bound array — not
+        // just this batch's slice, since the binding starts at element 0.
+        let instances_byte_length =
+            [(instance_count * mem::size_of::<gpui::CustomShaderInstance>()) as u32];
+
+        command_encoder.set_render_pipeline_state(pipeline);
+        command_encoder.set_vertex_buffer(
+            CustomShaderInputIndex::Instances as u64,
+            Some(&instance_bindings.custom_shaders.buffer),
+            instance_bindings.custom_shaders.offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            CustomShaderInputIndex::Instances as u64,
+            Some(&instance_bindings.custom_shaders.buffer),
+            instance_bindings.custom_shaders.offset as u64,
+        );
+        // Both stages: the vertex stage needs it for the NDC transform, and a
+        // `custom_effect` is free to read `globals` too.
+        command_encoder.set_vertex_bytes(
+            CustomShaderInputIndex::ViewportSize as u64,
+            mem::size_of_val(&globals) as u64,
+            &globals as *const CustomShaderGlobals as *const _,
+        );
+        command_encoder.set_fragment_bytes(
+            CustomShaderInputIndex::ViewportSize as u64,
+            mem::size_of_val(&globals) as u64,
+            &globals as *const CustomShaderGlobals as *const _,
+        );
+        command_encoder.set_vertex_bytes(
+            CustomShaderInputIndex::InstancesByteLength as u64,
+            mem::size_of_val(&instances_byte_length) as u64,
+            instances_byte_length.as_ptr() as *const _,
+        );
+        command_encoder.set_fragment_bytes(
+            CustomShaderInputIndex::InstancesByteLength as u64,
+            mem::size_of_val(&instances_byte_length) as u64,
+            instances_byte_length.as_ptr() as *const _,
+        );
+
+        // `[[instance_id]]` on Metal counts from the base instance, so the
+        // whole array stays bound and the batch's sub-range is expressed as the
+        // base instance — same as `draw_quads`.
+        command_encoder.draw_primitives_instanced_base_instance(
+            metal::MTLPrimitiveType::TriangleStrip,
+            0,
+            4,
+            range.len() as u64,
+            range.start as u64,
         );
     }
 
@@ -1760,6 +1881,7 @@ struct InstanceBindings {
     polychrome_sprites: InstanceBinding,
     surfaces: InstanceBinding,
     backdrop_blurs: InstanceBinding,
+    custom_shaders: InstanceBinding,
 }
 
 fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
@@ -1774,6 +1896,7 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
             content_mask: surface.content_mask,
         }))?,
         backdrop_blurs: writer.write(&scene.backdrop_blurs)?,
+        custom_shaders: writer.write(&scene.custom_shaders)?,
     })
 }
 
