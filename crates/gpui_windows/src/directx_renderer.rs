@@ -1015,15 +1015,34 @@ impl DirectXRenderer {
             0x8086 => "Intel Corporation".to_string(),
             id => format!("Unknown Vendor (ID: {:#X})", id),
         };
-        let driver_version = match desc.VendorId {
-            0x10DE => nvidia::get_driver_version(),
-            0x1002 => amd::get_driver_version(),
-            // For Intel and other vendors, we use the DXGI API to get the driver version.
-            _ => dxgi::get_driver_version(&devices.adapter),
-        }
-        .context("Failed to get gpu driver info")
-        .log_err()
-        .unwrap_or("Unknown Driver".to_string());
+        // The vendor SDKs report a friendlier string than DXGI does — AMD's
+        // Radeon Software version, NVIDIA's driver branch — but they live in
+        // DLLs that only some driver installs put on the search path.
+        // `amd_ags_x64.dll` is absent on plenty of machines running a current
+        // Radeon driver, and that is not an error worth reporting: DXGI always
+        // answers, and measured against an RX 9070 XT it returns exactly the
+        // version the driver registers (32.0.31035.1003). A missing vendor SDK
+        // therefore falls through to DXGI rather than to "Unknown Driver".
+        let vendor_version = match desc.VendorId {
+            0x10DE => Some(nvidia::get_driver_version()),
+            0x1002 => Some(amd::get_driver_version()),
+            // Intel and everything else have no SDK here; DXGI is the source.
+            _ => None,
+        };
+        let driver_version = match vendor_version {
+            Some(Ok(version)) => version,
+            vendor_result => {
+                if let Some(Err(error)) = vendor_result {
+                    log::debug!(
+                        "vendor driver-version SDK unavailable, falling back to DXGI: {error:#}"
+                    );
+                }
+                dxgi::get_driver_version(&devices.adapter)
+                    .context("Failed to get gpu driver info")
+                    .log_err()
+                    .unwrap_or_else(|| "Unknown Driver".to_string())
+            }
+        };
         Ok(GpuSpecs {
             is_software_emulated,
             device_name,
