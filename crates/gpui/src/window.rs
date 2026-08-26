@@ -6288,6 +6288,32 @@ impl Window {
         self.a11y.is_active()
     }
 
+    /// Build the accessibility tree every frame even when no assistive
+    /// technology has asked for it.
+    ///
+    /// The tree is normally built only while a screen reader is attached,
+    /// which is right for shipping — it is expensive, and nothing would read
+    /// it. But it leaves the tree unreadable to everything that wants to
+    /// *check* accessibility rather than consume it: a test asserting a
+    /// control announces itself, an inspector reading roles and states, a CI
+    /// run gating on either. Those need the tree without a screen reader on
+    /// the machine, which is what this turns on.
+    ///
+    /// Takes effect from the next frame: the flag for the frame currently
+    /// being painted has already been latched, because the builder keeps a
+    /// node stack that must be pushed and popped exactly once per frame.
+    ///
+    /// [`Application::new_inaccessible`] still wins — a window built by an app
+    /// that opted out of accessibility entirely stays out.
+    ///
+    /// See the [accessibility guide](crate::_accessibility) for an overview.
+    pub fn set_a11y_force_active(&mut self, force: bool) {
+        self.a11y.set_force_active(force);
+        if force {
+            self.refresh();
+        }
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()

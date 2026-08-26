@@ -40,6 +40,7 @@ upstream commits that carry no PR number.
 | `d8b7b8b3` | Public APIs for MCP UI inspection and event dispatch (dispatch wrappers, inspector entry points) |
 | `541898a1` | Capture painted text content for the MCP inspector |
 | `78866100` | Deduplicate inspector text content — assign to smallest container |
+| _this commit_ | **`Window::set_a11y_force_active`.** Upstream builds the AccessKit tree only while assistive technology is attached, which leaves it unreadable to anything that wants to *check* accessibility rather than consume it — a test, the MCP inspector, a CI run. Adds `force_enabled` to the per-window `A11y` and ORs it into `sync_active_flag`, so `Application::new_inaccessible` still wins and the default is unchanged. Takes effect from the next frame: the flag for the frame being painted is latched before the first node is pushed, and the builder late to that stack would push and pop unevenly. |
 
 ## 2. Per-element backdrop blur (macOS)
 

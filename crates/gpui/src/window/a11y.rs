@@ -128,6 +128,13 @@ pub(crate) struct A11y {
     ///
     /// [forcibly disabled]: crate::Application::new_inaccessible
     force_disabled: bool,
+    /// Whether the tree should be built every frame even though the system
+    /// never asked for it — see [`crate::Window::set_a11y_force_active`].
+    ///
+    /// Without this the tree exists only while an assistive technology is
+    /// attached, which leaves it unreadable to anything that wants to *check*
+    /// accessibility rather than consume it: a test, an inspector, a CI run.
+    force_enabled: bool,
     /// Whether a11y features have been requested by the system.
     ///
     /// Updated by AccessKit using callbacks provided to the adapter. Can change
@@ -171,6 +178,7 @@ impl A11y {
     ) -> Self {
         Self {
             force_disabled,
+            force_enabled: false,
             active_flag,
             active_this_frame: false,
             nodes: A11yNodeBuilder::new(),
@@ -210,7 +218,15 @@ impl A11y {
     /// See the docs for [`Self::active_flag`] and [`Self::active_this_frame`]
     /// for more commentary.
     pub(crate) fn sync_active_flag(&mut self) {
-        self.active_this_frame = !self.force_disabled && self.active_flag.load(Ordering::SeqCst);
+        self.active_this_frame =
+            !self.force_disabled && (self.force_enabled || self.active_flag.load(Ordering::SeqCst));
+    }
+
+    /// Build the tree every frame regardless of whether the system asked.
+    /// Takes effect from the next frame, since the flag for the frame being
+    /// painted has already been latched.
+    pub(crate) fn set_force_active(&mut self, force: bool) {
+        self.force_enabled = force;
     }
 
     pub(crate) fn is_active(&self) -> bool {

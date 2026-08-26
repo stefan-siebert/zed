@@ -1,5 +1,20 @@
 # Cross-Platform Accessibility Integration Plan for GPUI (Elane)
 
+> **Status (2026-08-26): upstream did this.** GPUI now carries a full
+> AccessKit integration — `accesskit` in `crates/gpui/Cargo.toml`, the guide in
+> `crates/gpui/src/_accessibility.rs`, `Element::a11y_role()`, roughly twenty
+> `aria_*` builders on `Interactivity` (label, description, selected, expanded,
+> toggled, value, placeholder, level, position-in-set, row/column), action
+> listeners and focus-to-node mapping. It arrived through the 2026-08-04
+> upstream merge, not through this fork. The plan below is kept as the record
+> of what was estimated at 4–6 weeks and then cost nothing.
+>
+> What remains is the third item: annotating the app's own widgets. The tree is
+> built only while assistive technology is attached; `Window::set_a11y_force_active`
+> (this fork) turns it on for a test or an inspector so the annotations can be
+> checked without a screen reader on the machine.
+
+
 Apple requires macOS applications to be accessible—in particular, they must support VoiceOver, standard keyboard navigation, and structural semantics. Currently, the GPUI fork used by Elane **does not contain any native accessibility bindings** (e.g., `NSAccessibility` protocols in `gpui_macos` are missing). Without this, Apple's App Store reviewers will reject Elane.
 
 To fix this and satisfy App Store requirements across all platforms (macOS, Windows, Linux), we need to retrofit accessibility into GPUI. The most industry-standard cross-platform way to accomplish this in Rust GUI frameworks is via the **AccessKit** library, which is used by egui, wgpu, and winit.
