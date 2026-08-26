@@ -789,6 +789,15 @@ pub struct InspectorElementInfo {
     pub instance_id: usize,
     /// Text content painted within this element's bounds (collected via spatial matching).
     pub text_content: Vec<String>,
+    /// The AccessKit node id this element's accessibility node carries, which
+    /// is derived from the same `GlobalElementId` as the path above.
+    ///
+    /// The node exists only if the element declared a role, so this is the id
+    /// to look for rather than a promise that something is there. It is the
+    /// only exact join between the inspector and the accessibility tree: a
+    /// node records the leaf of its element id and its source location, and
+    /// neither distinguishes four title-bar buttons that share both.
+    pub accesskit_node_id: u64,
 }
 
 impl Hitbox {
@@ -6676,6 +6685,7 @@ impl Window {
                     source_location: format!("{}", inspector_id.path.source_location),
                     instance_id: inspector_id.instance_id,
                     text_content,
+                    accesskit_node_id: inspector_id.path.global_id.accesskit_node_id().0,
                 }
             })
             .collect()
