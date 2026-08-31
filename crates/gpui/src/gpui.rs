@@ -5,8 +5,6 @@
 #![allow(unused_mut)] // False positives in platform specific code
 
 extern crate self as gpui;
-#[doc(hidden)]
-pub static GPUI_MANIFEST_DIR: &'static str = env!("CARGO_MANIFEST_DIR");
 #[macro_use]
 mod action;
 mod app;
@@ -22,6 +20,8 @@ pub mod colors;
 mod dmabuf;
 #[cfg(target_os = "windows")]
 mod d3d11_surface;
+#[cfg(feature = "profiler")]
+mod debug_overlay;
 mod element;
 mod elements;
 mod executor;
@@ -45,12 +45,14 @@ pub mod profiler;
     target_os = "windows",
     target_os = "linux",
     target_family = "wasm",
-    feature = "test-support"
+    feature = "test-support",
+    feature = "bench-support"
 ))]
 #[expect(missing_docs)]
 pub mod queue;
 mod scene;
 mod shared_uri;
+mod spring;
 mod style;
 mod styled;
 mod subscription;
@@ -103,6 +105,8 @@ pub use dmabuf::*;
 #[cfg(target_os = "windows")]
 pub use d3d11_surface::*;
 pub use ctor::ctor;
+#[cfg(feature = "profiler")]
+pub use debug_overlay::*;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
@@ -112,6 +116,7 @@ pub use global::*;
 pub use gpui_macros::{
     AppContext, IntoElement, Render, VisualContext, bench, property_test, register_action, test,
 };
+pub use spring::*;
 
 /// Defines a Criterion benchmark group for benchmarks annotated with [`gpui::bench`].
 ///
@@ -167,6 +172,7 @@ pub use util::{FutureExt, Timeout};
 pub use view::*;
 pub use window::*;
 
+#[cfg(not(target_family = "wasm"))]
 pub use pollster::block_on;
 
 /// The context trait, allows the different contexts in GPUI to be used

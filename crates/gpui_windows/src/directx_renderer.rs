@@ -366,11 +366,24 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        self.render(scene, background_appearance)?;
+        self.present()
+    }
+
+    /// Clear the render target for `background_appearance` and encode every
+    /// primitive batch of `scene` into it, without presenting. Shared by
+    /// [`draw`](Self::draw) (which then presents) and
+    /// [`render_to_image`](Self::render_to_image) (which reads the target back
+    /// instead), so the two cannot drift.
+    fn render(
+        &mut self,
+        scene: &Scene,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> Result<()> {
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
         })?;
-
         self.upload_scene_buffers(scene)?;
 
         let annotation = self
@@ -424,118 +437,92 @@ impl DirectXRenderer {
                 )
             })?;
         }
-        self.present()
+        Ok(())
     }
 
-    /// Renders the scene to the back buffer and reads the pixels back as an RGBA image.
-    /// Does not present the frame to screen.
-    pub(crate) fn render_to_image(&mut self, scene: &Scene) -> Result<image::RgbaImage> {
-        let width = self.width;
-        let height = self.height;
-        if width == 0 || height == 0 {
-            anyhow::bail!("Cannot render to image: window has zero size");
-        }
+    /// Render `scene` to an offscreen CPU image **without presenting** so
+    /// the window need never be shown or visible (the macOS headless path
+    /// goes through MetalRenderer; this is the Windows analogue). Draws into
+    /// the existing render target, copies it into a `D3D11_USAGE_STAGING`
+    /// texture, maps it, and converts BGRA to RGBA.
+    ///
+    /// Not gated on `test-support`, unlike upstream: this fork ungates
+    /// `render_to_image` on every backend (commits a820fc97 / c4724161) so the
+    /// MCP inspector can screenshot a live window. The fork carried its own
+    /// copy of this method until the 2026-09-01 merge, where upstream's grew
+    /// the device-lost guard and the `background_appearance` argument and went
+    /// through `render` rather than duplicating the batch loop; ours was the
+    /// weaker of the two, so it was dropped and this one ungated instead.
+    pub(crate) fn render_to_image(
+        &mut self,
+        scene: &Scene,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> Result<image::RgbaImage> {
+        // A pending device-lost recovery (`skip_draws`) leaves the atlas holding
+        // tile references from the previous device; drawing before the forced
+        // re-render rebuilds them panics in `DirectXAtlasState::texture`.
+        anyhow::ensure!(
+            !self.skip_draws,
+            "render_to_image unavailable while recovering from a lost device"
+        );
+        self.render(scene, background_appearance)?;
 
-        // Render scene to the swap chain back buffer (same pipeline as draw)
-        self.pre_draw(&[0.0f32; 4])?;
-        self.upload_scene_buffers(scene)?;
-
-        for batch in scene.batches() {
-            match batch {
-                PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
-                PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
-                PrimitiveBatch::Paths(range) => {
-                    let paths = &scene.paths[range];
-                    self.draw_paths_to_intermediate(paths)?;
-                    self.draw_paths_from_intermediate(paths)
-                }
-                PrimitiveBatch::Underlines(range) => self.draw_underlines(range.start, range.len()),
-                PrimitiveBatch::MonochromeSprites { texture_id, range } => {
-                    self.draw_monochrome_sprites(texture_id, range.start, range.len())
-                }
-                PrimitiveBatch::SubpixelSprites { texture_id, range } => {
-                    self.draw_subpixel_sprites(texture_id, range.start, range.len())
-                }
-                PrimitiveBatch::PolychromeSprites { texture_id, range } => {
-                    self.draw_polychrome_sprites(texture_id, range.start, range.len())
-                }
-                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
-                // Not implemented on this backend; `supports_backdrop_blur()`
-                // reports false so call sites fall back to a plain tinted fill.
-                PrimitiveBatch::BackdropBlurs(_) => Ok(()),
-                PrimitiveBatch::CustomShaders { shader_id, range } => {
-                    self.draw_custom_shaders(shader_id, range.start, range.len())
-                }
-            }
-            .context("render_to_image: failed to draw batch")?;
-        }
-
-        // Read back pixels from the render target instead of presenting
         let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
         let device = &devices.device;
-        let device_context = &devices.device_context;
+        let context = &devices.device_context;
+        let resources = self.resources.as_ref().context("resources missing")?;
         let render_target = resources
             .render_target
             .as_ref()
             .context("render target missing")?;
 
-        // Create a staging texture for CPU readback
-        let staging_texture = unsafe {
-            let mut output = None;
-            device.CreateTexture2D(
-                &D3D11_TEXTURE2D_DESC {
-                    Width: width,
-                    Height: height,
-                    MipLevels: 1,
-                    ArraySize: 1,
-                    Format: RENDER_TARGET_FORMAT,
-                    SampleDesc: DXGI_SAMPLE_DESC {
-                        Count: 1,
-                        Quality: 0,
-                    },
-                    Usage: D3D11_USAGE_STAGING,
-                    BindFlags: 0,
-                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                    MiscFlags: 0,
-                },
-                None,
-                Some(&mut output),
-            )?;
-            output.unwrap()
+        // A CPU-readable copy of the render target.
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { render_target.GetDesc(&mut desc) };
+        let width = desc.Width;
+        let height = desc.Height;
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+            MipLevels: 1,
+            ArraySize: 1,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            ..desc
         };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging))? };
+        let staging = staging.context("creating staging texture")?;
+        unsafe { context.CopyResource(&staging, render_target) };
 
-        // Copy rendered back buffer to staging texture
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
+        let row_bytes = (width as usize) * 4;
+        let mut pixels = vec![0u8; row_bytes * height as usize];
+        // SAFETY: `Map` succeeded, so `pData` points at `RowPitch * height`
+        // readable bytes for as long as the mapping is held, and `RowPitch >=
+        // row_bytes` (it only ever adds trailing padding). `pixels` is sized
+        // `row_bytes * height`, so every copy stays in bounds on both sides,
+        // and the regions cannot overlap (`pixels` is a fresh allocation).
         unsafe {
-            device_context.CopyResource(&staging_texture, render_target);
-        }
-
-        // Map staging texture and read BGRA pixels, converting to RGBA
-        let rgba_data = unsafe {
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            device_context.Map(&staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-
-            let row_pitch = mapped.RowPitch as usize;
-            let expected_row_bytes = width as usize * 4;
-            let mut rgba = Vec::with_capacity((width * height) as usize * 4);
-
-            for y in 0..height as usize {
-                let row_start = mapped.pData.byte_add(y * row_pitch);
-                let row = slice::from_raw_parts(row_start as *const u8, expected_row_bytes);
-                for pixel in row.chunks_exact(4) {
-                    rgba.push(pixel[2]); // R (was B in BGRA)
-                    rgba.push(pixel[1]); // G
-                    rgba.push(pixel[0]); // B (was R in BGRA)
-                    rgba.push(pixel[3]); // A
-                }
+            let src = mapped.pData as *const u8;
+            for row in 0..height as usize {
+                let s = src.add(row * mapped.RowPitch as usize);
+                let d = pixels.as_mut_ptr().add(row * row_bytes);
+                std::ptr::copy_nonoverlapping(s, d, row_bytes);
             }
-
-            device_context.Unmap(&staging_texture, 0);
-            rgba
-        };
-
-        image::RgbaImage::from_raw(width, height, rgba_data)
-            .context("Failed to create RgbaImage from pixel data")
+            context.Unmap(&staging, 0);
+        }
+        // The render target is BGRA; image::RgbaImage expects RGBA.
+        for px in pixels.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        image::RgbaImage::from_raw(width, height, pixels)
+            .context("Failed to build RgbaImage from staging readback")
     }
 
     pub(crate) fn resize(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
