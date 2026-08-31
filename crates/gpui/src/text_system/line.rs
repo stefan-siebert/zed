@@ -1,6 +1,6 @@
 use crate::{
     App, Bounds, DevicePixels, GlowParams, Half, Hsla, LineLayout, Pixels, Point,
-    RenderGlyphParams, Result, ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign,
+    RenderGlyphParams, Result, SharedString, StrikethroughStyle, TextAlign,
     UnderlineStyle, Window, WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
@@ -272,6 +272,9 @@ impl LineLayout {
             align_width,
             decoration_runs,
             &[],
+            // This fork's `paint_line` takes a glow spec; this entry point is
+            // upstream's bare-layout painter and carries no text style, so none.
+            None,
             window,
             cx,
         )
