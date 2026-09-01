@@ -2,7 +2,7 @@
 
 **Fork:** `stefan-siebert/zed`, branch `gpui-mcp-patches-v2`
 **Built from:** local checkout `../gpui-fork` (overrides the git dep via Cargo `[patch]` in Elane's `Cargo.toml`).
-**Baseline:** upstream Zed merged at commit `20ce54f8` (merge commit `0998e6f5`, 2026-08-04).
+**Baseline:** upstream Zed merged at commit `ce48461e` (merge commit `53bbec49`, 2026-09-01).
 
 This file inventories the **custom commits on top of upstream**. Everything else on the branch is upstream PRs pulled in by merges.
 
@@ -22,7 +22,7 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 
 ## Summary
 
-**54 custom commits**, net **+5,975 / −361 lines across 63 files** vs the upstream merge point (`20ce54f8`, measured 2026-08-04).
+**65 custom commits**, net **+6,693 / −379 lines across 68 files** vs the upstream merge point (`ce48461e`, measured 2026-09-01).
 
 Both figures come straight from the commands above; re-run them after every
 upstream merge, and move the baseline commit with them. Counting against
@@ -210,7 +210,26 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 | `dd6bf383` | Doc comment for `Window::paint_glyph` |
 | (in diff) | `ACCESSIBILITY_PLAN.md` (+34) |
 
+
+## 14. What the 2026-09-01 upstream merge moved
+
+Not new patches — the same ones, re-seated. Recorded because the next merge
+will land on this shape, not the one the sections above describe.
+
+| Was | Is |
+|---|---|
+| `gpui_macos/src/{metal_renderer,metal_atlas,shaders.metal}` | `gpui_apple/src/…` — upstream extracted the crate. The fork's own `metal_custom_shader.rs` moved with them (its only caller is `metal_renderer.rs`), and the `naga` dependency moved from `gpui_macos` to `gpui_apple`. |
+| `PlatformWindow::completed_frame` | `PlatformWindow::schedule_frame`. Upstream removed the former with the demand-driven Wayland loop (#60690). The Wayland backend's fork patches sit on the new loop: the `closed` guard and the `pending_drawable_size` / `pending_viewport_dest` deferral are unchanged, `force_render_after_recovery` became upstream's `redraw_requested` (the field itself is gone; **X11 still has its own**), and the wlroots empty-commit workaround is dropped — `complete_frame`'s presentation state machine commits on the `RetryAfterPresent` path instead. |
+| `WM_GPUI_NATIVE_DRAG = WM_USER + 9` | `WM_USER + 100`. Upstream's new `WM_GPUI_END_SESSION` took `+9`. Fork window messages start at `+100` from now on, so upstream can keep growing its block one at a time. |
+| Two `DirectXRenderer::render_to_image` | One. Upstream grew its own — device-lost guard, `background_appearance`, and it goes through `render` rather than duplicating the batch loop — so the fork's copy is gone and upstream's is ungated instead, which is all the fork ever wanted from it. |
+
+One thing to watch on the next merge: the throttled-configure early return in
+`wayland/window.rs` (the 1px Mutter "wabbern" fix) now calls `request_redraw()`
+before returning. Nothing ticks on its own any more, and `resize_throttle` is
+cleared at the top of `frame()` — parking with the flag still set would skip
+every further resizing configure and freeze the window for the rest of the drag.
 ---
+
 
 ## Platform coverage of the diff
 
@@ -223,53 +242,77 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 
 ---
 
-## Full file-level diff stat (vs `832c17e8`)
-
+## Full file-level diff stat (vs `ce48461e`)
 ```
- ACCESSIBILITY_PLAN.md                            |  34 +++++
- Cargo.lock                                       |   2 +
- Cargo.toml                                       |   2 +-
- crates/gpui/src/app.rs                           |   4 +
- crates/gpui/src/assets.rs                        |  23 +++
- crates/gpui/src/elements/div.rs                  |   8 +
- crates/gpui/src/elements/img.rs                  |  80 ++++++++--
- crates/gpui/src/elements/text.rs                 |  39 +++--
- crates/gpui/src/platform.rs                      |  66 ++++++--
- crates/gpui/src/scene.rs                         |  77 ++++++++++
- crates/gpui/src/style.rs                         |  15 ++
- crates/gpui/src/styled.rs                        |  14 +-
- crates/gpui/src/text_system.rs                   |  98 +++++++++++-
- crates/gpui/src/text_system/line.rs              | 112 +++++++++++++-
- crates/gpui/src/window.rs                        | 310 +++++++++++++++++++++++++++++++++++--
- crates/gpui_linux/Cargo.toml                     |   2 +-
- crates/gpui_linux/src/linux/platform.rs          |  47 +++++-
+ ACCESSIBILITY_PLAN.md                            |  49 ++++++++
+ Cargo.lock                                       |   7 +-
+ Cargo.toml                                       |   1 +
+ FORK_CHANGES.md                                  | 275 +++++++++++++++++++++++++++++++++++++++++
+ crates/gpui/Cargo.toml                           |   4 +-
+ crates/gpui/src/app.rs                           |   8 ++
+ crates/gpui/src/assets.rs                        |  23 ++++
+ crates/gpui/src/d3d11_surface.rs                 |  64 ++++++++++
+ crates/gpui/src/dmabuf.rs                        | 135 ++++++++++++++++++++
+ crates/gpui/src/elements/div.rs                  |   8 ++
+ crates/gpui/src/elements/img.rs                  |  82 +++++++++++--
+ crates/gpui/src/elements/surface.rs              |  56 ++++++++-
+ crates/gpui/src/elements/text.rs                 |  39 ++++--
+ crates/gpui/src/gpui.rs                          |   8 ++
+ crates/gpui/src/platform.rs                      |  89 +++++++++++++-
+ crates/gpui/src/scene.rs                         | 159 ++++++++++++++++++++++++
+ crates/gpui/src/style.rs                         |  18 +++
+ crates/gpui/src/styled.rs                        |  12 +-
+ crates/gpui/src/taffy.rs                         | 155 +++++++++++++++++++++++
+ crates/gpui/src/text_system.rs                   | 132 ++++++++++++++++----
+ crates/gpui/src/text_system/glow_mask.rs         | 182 +++++++++++++++++++++++++++
+ crates/gpui/src/text_system/line.rs              | 115 ++++++++++++++++-
+ crates/gpui/src/window.rs                        | 530 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----
+ crates/gpui/src/window/a11y.rs                   |  18 ++-
+ crates/gpui_apple/Cargo.toml                     |   5 +
+ crates/gpui_apple/build.rs                       |   4 +
+ crates/gpui_apple/src/gpui_apple.rs              |   5 +
+ crates/gpui_apple/src/metal_custom_shader.rs     | 522 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_apple/src/metal_renderer.rs          | 550 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ crates/gpui_apple/src/shaders.metal              | 179 ++++++++++++++++++++++++++-
+ crates/gpui_linux/Cargo.toml                     |   1 +
+ crates/gpui_linux/src/linux/platform.rs          |  47 ++++++-
  crates/gpui_linux/src/linux/wayland.rs           |   2 +-
- crates/gpui_linux/src/linux/wayland/client.rs    | 252 +++++++++++++++++++++++++++++-
- crates/gpui_linux/src/linux/wayland/clipboard.rs |  79 ++++++++--
- crates/gpui_linux/src/linux/wayland/window.rs    | 156 ++++++++++++++++---
- crates/gpui_linux/src/linux/x11/client.rs        |  42 +++--
- crates/gpui_linux/src/linux/x11/clipboard.rs     |  16 +-
- crates/gpui_linux/src/linux/x11/window.rs        |  20 ++-
- crates/gpui_macos/src/metal_renderer.rs          |   3 +-
- crates/gpui_macos/src/pasteboard.rs              |  39 ++++-
- crates/gpui_macos/src/shaders.metal              |  36 ++++-
- crates/gpui_macos/src/window.rs                  |   6 +-
- crates/gpui_web/src/window.rs                    |  20 ++-
- crates/gpui_wgpu/Cargo.toml                      |   1 +
- crates/gpui_wgpu/src/cosmic_text_system.rs       | 117 +++++++++++++-
- crates/gpui_wgpu/src/shaders.wgsl                |  84 +++++++++-
- crates/gpui_wgpu/src/wgpu_renderer.rs            | 464 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ crates/gpui_linux/src/linux/wayland/client.rs    | 231 +++++++++++++++++++++++++++++++++-
+ crates/gpui_linux/src/linux/wayland/clipboard.rs |  78 ++++++++++--
+ crates/gpui_linux/src/linux/wayland/window.rs    | 237 +++++++++++++++++++++++++++++++----
+ crates/gpui_linux/src/linux/x11/client.rs        |  42 +++++--
+ crates/gpui_linux/src/linux/x11/clipboard.rs     |  16 ++-
+ crates/gpui_linux/src/linux/x11/window.rs        |  29 ++++-
+ crates/gpui_macos/src/pasteboard.rs              |  39 +++++-
+ crates/gpui_macos/src/text_system.rs             |  23 +++-
+ crates/gpui_macos/src/window.rs                  | 162 ++++++++----------------
+ crates/gpui_shared_string/Cargo.toml             |   1 +
+ crates/gpui_util/Cargo.toml                      |   1 +
+ crates/gpui_util/src/lib.rs                      |  22 +++-
+ crates/gpui_web/src/window.rs                    |  13 +-
+ crates/gpui_wgpu/Cargo.toml                      |   5 +
+ crates/gpui_wgpu/src/cosmic_text_system.rs       |  69 ++++++++++-
+ crates/gpui_wgpu/src/dmabuf_texture.rs           | 206 +++++++++++++++++++++++++++++++
+ crates/gpui_wgpu/src/gpui_wgpu.rs                |   2 +
+ crates/gpui_wgpu/src/shaders.wgsl                |  96 +++++++++++++--
+ crates/gpui_wgpu/src/wgpu_context.rs             | 181 +++++++++++++++++++++++++++
+ crates/gpui_wgpu/src/wgpu_renderer.rs            | 635 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
  crates/gpui_windows/Cargo.toml                   |   1 +
- crates/gpui_windows/src/clipboard.rs             |  37 ++++-
- crates/gpui_windows/src/direct_write.rs          | 141 +++++++++++++++--
- crates/gpui_windows/src/directx_custom_shader.rs | 419 ++++++++++++++++++++++++++++++++++++++++++++++++++
- crates/gpui_windows/src/directx_renderer.rs      | 185 +++++++++++++++++++++-
- crates/gpui_windows/src/events.rs                |  30 ++++
+ crates/gpui_windows/build.rs                     |   1 +
+ crates/gpui_windows/src/clipboard.rs             |  37 +++++-
+ crates/gpui_windows/src/direct_write.rs          |  41 +++++--
+ crates/gpui_windows/src/directx_custom_shader.rs | 420 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_windows/src/directx_renderer.rs      | 270 ++++++++++++++++++++++++++++++++++++++--
+ crates/gpui_windows/src/events.rs                |  36 ++++++
  crates/gpui_windows/src/gpui_windows.rs          |   2 +
- crates/gpui_windows/src/keyboard.rs              |  71 ++++-----
- crates/gpui_windows/src/native_drag.rs           | 522 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- crates/gpui_windows/src/window.rs                |  45 ++++++
- 43 files changed, 3537 insertions(+), 186 deletions(-)
+ crates/gpui_windows/src/keyboard.rs              |  71 +++++------
+ crates/gpui_windows/src/native_drag.rs           | 522 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_windows/src/shaders.hlsl             |  37 ++++++
+ crates/gpui_windows/src/window.rs                |  51 +++++++-
+ crates/sum_tree/Cargo.toml                       |   2 -
+ crates/sum_tree/src/cursor.rs                    |   2 +-
+ crates/sum_tree/src/sum_tree.rs                  |   7 +-
+ 68 files changed, 6693 insertions(+), 379 deletions(-)
 ```
 
-_Last generated: 2026-06-17 (commit `c472416104` at branch HEAD)._
+_Last generated: 2026-09-01 (commit `ce85100f4a` at branch HEAD)._
