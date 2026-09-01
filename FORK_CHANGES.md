@@ -147,6 +147,31 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 | `6d13b23a` | Keep unshifted key + shift modifier in `get_keystroke_key` |
 | `01ff34dd` | Drop shift modifier on keybinding side after shifted-key substitution |
 
+## 6b. Keypad key names (Windows + macOS)
+
+| Commit | Change |
+|---|---|
+| _this commit_ | Name the keypad's arithmetic keys apart from the main row, as the Linux backend already does |
+
+`gpui_windows`' `parse_immutable` maps `VK_MULTIPLY` / `VK_ADD` / `VK_SUBTRACT`
+/ `VK_DIVIDE` / `VK_DECIMAL` to `"multiply"` / `"add"` / `"subtract"` /
+`"divide"` / `"decimal"`, and `gpui_macos`' `keypad_key_name` does the same by
+hardware key code (`kVK_ANSI_Keypad*`). Both used to fall through to a plain
+`"*"` / `"+"` / `"-"` — `MapVirtualKeyW(MAPVK_VK_TO_CHAR)` on Windows,
+`charactersIgnoringModifiers` on macOS — which made the two keys
+indistinguishable to a keymap. Linux has named them all along
+(`is_keypad_key()` in `gpui_linux`'s `platform.rs`), so this closes a
+platform gap rather than inventing a convention.
+
+`key_char` is untouched on both platforms: the keypad's `*` still types `"*"`
+into a text field, it just no longer *matches* the main row's `*` in a keymap.
+The keypad's digits keep the main row's names and its Enter stays `"enter"` —
+both deliberate, both what Linux does.
+
+Elane needs this: a file manager binds the numpad's `*` to "invert selection"
+while `*` typed on the main row starts a wildcard search. Under the old naming
+the binding swallowed the wildcard.
+
 ## 7. Windows text rendering (DirectWrite)
 
 | Commit | Change |

@@ -1563,6 +1563,20 @@ fn parse_immutable(vkey: VIRTUAL_KEY) -> Option<String> {
             VK_INSERT => "insert",
             VK_DELETE => "delete",
             VK_APPS => "menu",
+            // The keypad, named apart from the main row — the same names the
+            // Linux backend gets from XKB (`KP_Multiply` → "multiply"). Without
+            // this these fall through to `get_key_from_vkey`, where
+            // `MapVirtualKeyW(MAPVK_VK_TO_CHAR)` folds VK_MULTIPLY into a plain
+            // "*" and no keymap can tell the two keys apart — a file manager
+            // binding the numpad's `*` to "invert selection" would swallow the
+            // `*` a user types as a wildcard. `key_char` is computed separately
+            // in `process_key` and still carries "*", so text input is
+            // unaffected.
+            VK_MULTIPLY => "multiply",
+            VK_ADD => "add",
+            VK_SUBTRACT => "subtract",
+            VK_DIVIDE => "divide",
+            VK_DECIMAL => "decimal",
             VK_F1 => "f1",
             VK_F2 => "f2",
             VK_F3 => "f3",

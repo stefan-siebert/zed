@@ -26,6 +26,32 @@ pub(crate) const ESCAPE_KEY: u16 = 0x1b;
 const TAB_KEY: u16 = 0x09;
 const SHIFT_TAB_KEY: u16 = 0x19;
 
+/// The keypad's arithmetic keys, by hardware key code
+/// (`kVK_ANSI_Keypad*` in Carbon's `Events.h`), named apart from the main
+/// row — the same names the Linux backend gets from XKB (`KP_Multiply` →
+/// "multiply").
+///
+/// `charactersIgnoringModifiers` reports a plain "*" for both the keypad and
+/// the main row, so without this no keymap can tell them apart: a file
+/// manager binding the numpad's `*` to "invert selection" would swallow the
+/// `*` a user types as a wildcard. The key *code* is layout-independent and
+/// exact, unlike `NSEventModifierFlagNumericPad`, which macOS also sets for
+/// the arrow keys.
+///
+/// Only the arithmetic keys are renamed. The keypad's digits already carry
+/// the main row's names on every platform, and its Enter is folded into
+/// "enter" above — both deliberate, and both what Linux does.
+fn keypad_key_name(key_code: u16) -> Option<&'static str> {
+    Some(match key_code {
+        0x41 => "decimal",
+        0x43 => "multiply",
+        0x45 => "add",
+        0x4b => "divide",
+        0x4e => "subtract",
+        _ => return None,
+    })
+}
+
 pub fn key_to_native(key: &str) -> Cow<'_, str> {
     use cocoa::appkit::*;
     let code = match key {
@@ -481,6 +507,11 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
                 }
             }
         };
+
+        // Applied after the match so `key_char` keeps whatever the arms
+        // computed: the keypad's `*` still types "*" into a text field, it
+        // just no longer *matches* the main row's `*` in a keymap.
+        let key = keypad_key_name(native_event.keyCode()).map_or(key, str::to_owned);
 
         Keystroke {
             modifiers: Modifiers {
