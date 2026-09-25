@@ -10,10 +10,13 @@ workspace = true
 
 [lib]
 path = "src/gpui_wgpu.rs"
+doctest = false
 
 [features]
 default = []
+bench-support = ["gpui/bench-support"]
 font-kit = ["dep:font-kit"]
+test-support = ["gpui/test-support"]
 
 [dependencies]
 gpui.workspace = true
@@ -49,6 +52,8 @@ wgpu = { workspace = true, features = ["webgl"] }
 
 [dev-dependencies]
 criterion.workspace = true
+gpui = { workspace = true, features = ["bench-support"] }
+image.workspace = true
 naga = { version = "29.0.4", features = ["wgsl-in"] }
 
 [[bench]]
