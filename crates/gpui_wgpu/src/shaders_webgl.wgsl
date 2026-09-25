@@ -136,57 +136,39 @@ fn read_transformation(cursor: ptr<function, InstanceCursor>) -> TransformationM
 }
 
 fn load_quad(instance_id: u32) -> Quad {
-    // Keep this fixed-layout decoder explicit. Some WebGL shader compilers fail
-    // to optimize the cursor's branches and dynamic vector indexing for quads.
-    let first_texel_index = instance_id * 10u;
-    let width = textureDimensions(t_instances).x;
-    let texel0 = fetch_instance_texel(first_texel_index, width);
-    let texel1 = fetch_instance_texel(first_texel_index + 1u, width);
-    let texel2 = fetch_instance_texel(first_texel_index + 2u, width);
-    let texel3 = fetch_instance_texel(first_texel_index + 3u, width);
-    let texel4 = fetch_instance_texel(first_texel_index + 4u, width);
-    let texel5 = fetch_instance_texel(first_texel_index + 5u, width);
-    let texel6 = fetch_instance_texel(first_texel_index + 6u, width);
-    let texel7 = fetch_instance_texel(first_texel_index + 7u, width);
-    let texel8 = fetch_instance_texel(first_texel_index + 8u, width);
-    let texel9 = fetch_instance_texel(first_texel_index + 9u, width);
-
-    let values0 = bitcast<vec4<f32>>(texel0);
-    let values1 = bitcast<vec4<f32>>(texel1);
-    let values2 = bitcast<vec4<f32>>(texel2);
-    let values3 = bitcast<vec4<f32>>(texel3);
-    let values4 = bitcast<vec4<f32>>(texel4);
-    let values5 = bitcast<vec4<f32>>(texel5);
-    let values6 = bitcast<vec4<f32>>(texel6);
-    let values7 = bitcast<vec4<f32>>(texel7);
-    let values8 = bitcast<vec4<f32>>(texel8);
-    let values9 = bitcast<vec4<f32>>(texel9);
-
+    // Fork: the quad carries the shader-effect words (effect_type, padding,
+    // effect_params), 46 words in all. That is not a whole number of texels,
+    // so upstream's fixed ten-texel decoder cannot address it; read it with
+    // the word cursor like every other primitive.
+    var cursor = instance_cursor(instance_id * 46u);
+    let order = read_word(&cursor);
+    let border_style = read_word(&cursor);
+    let bounds = read_bounds(&cursor);
+    let content_mask = read_bounds(&cursor);
+    let background = read_background(&cursor);
+    let border_color = read_hsla(&cursor);
+    let corner_radii = read_corners(&cursor);
+    let border_widths = read_edges(&cursor);
+    let effect_type = read_word(&cursor);
+    let effect_pad = read_word(&cursor);
+    let effect_params = array<f32, 4>(
+        read_f32(&cursor),
+        read_f32(&cursor),
+        read_f32(&cursor),
+        read_f32(&cursor),
+    );
     return Quad(
-        texel0.x,
-        texel0.y,
-        Bounds(values0.zw, values1.xy),
-        Bounds(values1.zw, values2.xy),
-        Background(
-            texel2.z,
-            texel2.w,
-            Hsla(values3.x, values3.y, values3.z, values3.w),
-            values4.x,
-            array<LinearColorStop, 2>(
-                LinearColorStop(
-                    Hsla(values4.y, values4.z, values4.w, values5.x),
-                    values5.y,
-                ),
-                LinearColorStop(
-                    Hsla(values5.z, values5.w, values6.x, values6.y),
-                    values6.z,
-                ),
-            ),
-            texel6.w,
-        ),
-        Hsla(values7.x, values7.y, values7.z, values7.w),
-        Corners(values8.x, values8.y, values8.z, values8.w),
-        Edges(values9.x, values9.y, values9.z, values9.w),
+        order,
+        border_style,
+        bounds,
+        content_mask,
+        background,
+        border_color,
+        corner_radii,
+        border_widths,
+        effect_type,
+        effect_pad,
+        effect_params,
     );
 }
 

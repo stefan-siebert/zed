@@ -3138,6 +3138,10 @@ mod tests {
             border_color: color,
             corner_radii: Corners::default(),
             border_widths: Edges::default(),
+            // Fork: no shader effect.
+            effect_type: 0,
+            _effect_pad: 0,
+            effect_params: [0.0; 4],
         }
     }
 
@@ -3287,7 +3291,7 @@ mod tests {
 
     #[test]
     fn webgl_record_sizes_match_shader_word_strides() {
-        assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
+        assert_eq!(std::mem::size_of::<Quad>(), 46 * 4);
         assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
@@ -3298,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn webgl_quad_layout_matches_fixed_decoder() {
+    fn webgl_quad_layout_matches_the_decoder() {
         let quad = Quad {
             order: 41,
             border_style: BorderStyle::Dashed,
@@ -3364,6 +3368,10 @@ mod tests {
                 bottom: 32.0.into(),
                 left: 33.0.into(),
             },
+            // Fork: no shader effect.
+            effect_type: 0,
+            _effect_pad: 0,
+            effect_params: [0.0; 4],
         };
 
         let bytes = unsafe { WgpuRendererCore::instance_bytes(std::slice::from_ref(&quad)) };
@@ -3411,6 +3419,13 @@ mod tests {
                 31.0_f32.to_bits(),
                 32.0_f32.to_bits(),
                 33.0_f32.to_bits(),
+                // Fork: effect_type, padding, effect_params.
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
             ]
         );
     }

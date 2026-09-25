@@ -207,14 +207,20 @@ impl PlatformTextSystem for CosmicTextSystem {
         let base_id = candidates[ix];
 
         // Variable fonts are loaded at NORMAL weight by load_family.
-        // If the caller requests a different weight, try to reload the same
-        // face at the correct weight.  For variable fonts this creates a
-        // distinct instance; for static fonts get_font returns the same data
-        // (harmless duplicate).  Only weight is handled here — get_font can't
-        // change style (italic needs a separate face).
+        // If the caller requests a different weight, reload the same face at
+        // that weight, which creates a distinct instance. A static face has
+        // nothing to reload — it would only be a duplicate under a new id —
+        // so this is limited to faces with a `wght` axis. Only weight is
+        // handled here — get_font can't change style (italic needs a
+        // separate face).
         let target_weight = cosmic_text::Weight(font.weight.0 as u16);
-        let (db_id, face_weight, features, is_emoji, user_fallback_chain) = {
+        let (db_id, face_weight, has_weight_axis, features, is_emoji, user_fallback_chain) = {
             let loaded = state.loaded_font(base_id);
+            let has_weight_axis = loaded
+                .font
+                .as_swash()
+                .variations()
+                .any(|axis| axis.tag() == swash::tag_from_bytes(b"wght"));
             let db_id = loaded.font.id();
             let face_info = state
                 .font_system
@@ -224,13 +230,14 @@ impl PlatformTextSystem for CosmicTextSystem {
             (
                 db_id,
                 face_info.weight,
+                has_weight_axis,
                 loaded.features.clone(),
                 loaded.is_known_emoji_font,
                 loaded.user_fallback_chain.clone(),
             )
         };
 
-        if face_weight != target_weight {
+        if has_weight_axis && face_weight != target_weight {
             if let Some(reloaded) = state.font_system.get_font(db_id, target_weight) {
                 let new_id = FontId(state.loaded_fonts.len());
                 state.loaded_fonts.push(LoadedFont {
