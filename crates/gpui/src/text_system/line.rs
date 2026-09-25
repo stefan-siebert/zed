@@ -1398,6 +1398,7 @@ mod tests {
                     Some(px(16.)),
                     &wrapped.decoration_runs,
                     &wrapped.wrap_boundaries,
+                    None,
                     window,
                     cx,
                     &mut |range, origin, width, style, window| {
