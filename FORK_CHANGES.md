@@ -2,7 +2,7 @@
 
 **Fork:** `stefan-siebert/zed`, branch `gpui-mcp-patches-v2`
 **Built from:** local checkout `../gpui-fork` (overrides the git dep via Cargo `[patch]` in Elane's `Cargo.toml`).
-**Baseline:** upstream Zed merged at commit `ce48461e` (merge commit `53bbec49`, 2026-09-01).
+**Baseline:** upstream Zed merged at commit `933d8d93` (merge commit `3f66c9e1`, 2026-09-25).
 
 This file inventories the **custom commits on top of upstream**. Everything else on the branch is upstream PRs pulled in by merges.
 
@@ -22,7 +22,7 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 
 ## Summary
 
-**65 custom commits**, net **+6,693 / −379 lines across 68 files** vs the upstream merge point (`ce48461e`, measured 2026-09-01).
+**70 custom commits**, net **+6,685 / −383 lines across 69 files** vs the upstream merge point (`933d8d93`, measured 2026-09-25).
 
 Both figures come straight from the commands above; re-run them after every
 upstream merge, and move the baseline commit with them. Counting against
@@ -98,6 +98,12 @@ the shader preserves the target's alpha.
 | `0f18336c` | **Text glow on macOS.** `gpui_macos`'s CoreGraphics rasterizer ignored `RenderGlyphParams::embolden`, so glow glyphs rasterized as plain sharp glyphs painted underneath the foreground pass — fully occluded, i.e. `text_glow()` silently did nothing on macOS (Elane titlebar wordmark). The mask-space glow post-processing (`glow_padding_pixels` / `embolden_alpha_mask` / `blur_alpha_mask`), previously duplicated across `gpui_windows/direct_write.rs` and `gpui_wgpu/cosmic_text_system.rs`, moved to shared `gpui/src/text_system/glow_mask.rs` (+ unit tests); both backends now import it and `gpui_macos/text_system.rs` applies it (padded `raster_bounds`, dilate + blur on the CG alpha mask, emoji path skipped). Also: `gpui`'s dev-dependency on `gpui_platform` now enables `runtime_shaders` so `cargo test -p gpui` builds on macOS without the Xcode Metal Toolchain component. |
 
 New/large files: `gpui_windows/src/directx_custom_shader.rs` (+419), `gpui_macos/src/metal_custom_shader.rs` (+500), `gpui_wgpu/src/wgpu_renderer.rs` (+464), `shaders.wgsl`, `shaders.metal`.
+
+Since the 2026-09-25 merge the wgpu side sits on upstream's `WgpuRendererCore`
+(shared with the headless renderer): compiled custom-shader pipelines live in the
+core, the WGSL sources on `WgpuRenderer` (`custom_shaders`), so `recover()` after
+a lost device recompiles them for the new one. `render_to_image` renders through
+`core.render_frame` into an offscreen texture and reads it back (`read_texture`).
 
 **`ec534b9e` — two bugs surfaced by the first heavy real use of custom shaders**
 (Elane's disk-usage treemap, which emits hundreds of custom-shader quads per
