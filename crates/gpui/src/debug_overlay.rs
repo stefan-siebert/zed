@@ -225,6 +225,10 @@ fn solid_quad(
         border_color: transparent_black(),
         corner_radii: Corners::default(),
         border_widths: Edges::default(),
+        // Fork: the effect fields of the custom-shader quad path; 0 is none.
+        effect_type: 0,
+        _effect_pad: 0,
+        effect_params: [0.0; 4],
     }
 }
 
