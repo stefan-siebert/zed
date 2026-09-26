@@ -129,12 +129,6 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-#[link(name = "AppKit", kind = "framework")]
-unsafe extern "C" {
-    // AppKit constant naming the icon component of an NSDraggingImageComponent.
-    #[allow(non_upper_case_globals)]
-    static NSDraggingImageComponentIconKey: id;
-}
 #[ctor(unsafe)]
 unsafe fn build_classes() {
     unsafe {
