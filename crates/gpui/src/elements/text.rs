@@ -632,6 +632,11 @@ impl TextLayout {
         _: &mut App,
     ) -> LayoutId {
         let text_style = window.text_style();
+        let text = if text_style.white_space == WhiteSpace::Nowrap {
+            collapse_line_breaks(text)
+        } else {
+            text
+        };
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let line_height = window.pixel_snap(
             text_style
@@ -1301,9 +1306,111 @@ impl IntoElement for InteractiveText {
     }
 }
 
+/// Single-line text draws line breaks as spaces, as CSS `white-space: nowrap`
+/// does — `shape_text` otherwise starts a new line at every `\n`, whatever the
+/// element's wrapping style. Text that is not ours to edit, a file name above
+/// all, can carry one (Google Drive puts a Doc's title, newline included, on
+/// disk as its name).
+///
+/// Only characters that end a line are replaced: `\n`, `\r`, NEL, and the
+/// Unicode line and paragraph separators. Everything else, a tab included,
+/// renders exactly as before. Each becomes as many spaces as it has UTF-8
+/// bytes, so every byte offset — runs, highlights, hit-testing indices — still
+/// points at the same text. Borrows when there is nothing to replace.
+fn collapse_line_breaks(text: SharedString) -> SharedString {
+    fn is_line_break(character: char) -> bool {
+        matches!(
+            character,
+            '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        )
+    }
+    if !text.chars().any(is_line_break) {
+        return text;
+    }
+    let mut collapsed = String::with_capacity(text.len());
+    for character in text.chars() {
+        if is_line_break(character) {
+            collapsed.extend(std::iter::repeat_n(' ', character.len_utf8()));
+        } else {
+            collapsed.push(character);
+        }
+    }
+    collapsed.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collapsing_line_breaks_keeps_every_byte_offset() {
+        let text: SharedString = "Strategy\n.gdoc\r\nä\u{85}x\u{2028}y".into();
+        let collapsed = collapse_line_breaks(text.clone());
+        assert_eq!(collapsed.as_ref(), "Strategy .gdoc  ä  x   y");
+        assert_eq!(collapsed.len(), text.len());
+        for (index, _) in text.char_indices() {
+            assert!(collapsed.is_char_boundary(index), "offset {index}");
+        }
+    }
+
+    #[test]
+    fn tabs_and_other_text_are_left_alone() {
+        let text: SharedString = "col\tcol plain.pdf".into();
+        assert_eq!(collapse_line_breaks(text.clone()), text);
+    }
+
+    struct NewlineTextView {
+        nowrap: bool,
+        layout: Rc<RefCell<Option<TextLayout>>>,
+    }
+
+    impl crate::Render for NewlineTextView {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut crate::Context<Self>,
+        ) -> impl IntoElement {
+            use crate::{ParentElement as _, Styled as _, div};
+            let text = StyledText::new("Strategy\n.gdoc");
+            self.layout.replace(Some(text.layout().clone()));
+            let container = div().w(crate::px(400.));
+            if self.nowrap {
+                container.whitespace_nowrap().child(text)
+            } else {
+                container.child(text)
+            }
+        }
+    }
+
+    fn line_count(cx: &mut crate::TestAppContext, nowrap: bool) -> usize {
+        let layout = Rc::new(RefCell::new(None));
+        let window = cx.add_window({
+            let layout = layout.clone();
+            move |_, _| NewlineTextView { nowrap, layout }
+        });
+        crate::AppContext::update_window(
+            cx,
+            crate::AnyWindowHandle::from(window),
+            |_, window, cx| window.draw(cx).clear(cx),
+        )
+            .expect("window is open");
+        let lines = layout
+            .borrow()
+            .as_ref()
+            .map(|layout: &TextLayout| layout.line_layouts().len())
+            .unwrap_or_default();
+        lines
+    }
+
+    #[crate::test]
+    fn nowrap_text_keeps_a_newline_on_one_line(cx: &mut crate::TestAppContext) {
+        assert_eq!(line_count(cx, true), 1);
+    }
+
+    #[crate::test]
+    fn wrapping_text_still_breaks_at_a_newline(cx: &mut crate::TestAppContext) {
+        assert_eq!(line_count(cx, false), 2);
+    }
 
     #[test]
     fn test_into_element_for() {
