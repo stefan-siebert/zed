@@ -208,6 +208,7 @@ the binding swallowed the wildcard.
 | Commit | Change |
 |---|---|
 | `93a1d339` | Cache font-resolution failures as `Arc<anyhow::Error>` — cache hits for a missing family no longer construct a fresh anyhow error (= backtrace capture when `RUST_BACKTRACE` is set) per text line per frame |
+| `7e751f5d` | `WhiteSpace::Nowrap` text collapses line breaks (`\n`, `\r`, NEL, U+2028/2029) into spaces, byte for byte, as CSS `nowrap` does — `shape_text` otherwise broke a single-line label at a `\n` in a file name. Tabs and `Normal` text untouched |
 
 ## 11. Layout engine (taffy)
 
