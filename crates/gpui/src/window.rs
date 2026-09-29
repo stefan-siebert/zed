@@ -7269,9 +7269,12 @@ impl Window {
         }))
     }
 
+    /// Whether this frame builds inspector element ids: while the window's
+    /// inspector is open, or always once an external inspector asked for them
+    /// ([`App::request_inspector_ids`]).
     #[cfg(any(feature = "inspector", debug_assertions))]
-    pub(crate) fn inspector_enabled(&self) -> bool {
-        self.inspector.is_some()
+    pub(crate) fn inspector_enabled(&self, cx: &App) -> bool {
+        self.inspector.is_some() || cx.inspector_ids_requested
     }
 
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -9704,6 +9707,40 @@ mod inspector_tests {
                 .update(cx, |_, window, cx| window.toggle_inspector(cx))
                 .expect("close inspector");
             assert_closed_inspector(windows[0].into(), cx);
+        }
+    }
+
+    /// An external inspector asks for element ids once, and every window
+    /// reports its interactive elements from then on, though none opens its
+    /// inspector.
+    #[gpui::test]
+    fn requested_inspector_ids_reach_every_window(cx: &mut TestAppContext) {
+        let windows = [
+            cx.add_window(|_, _| ClickableTestView),
+            cx.add_window(|_, _| ClickableTestView),
+        ];
+        cx.update_window(windows[0].into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(window.inspector_elements().is_empty(), "not requested yet");
+        })
+        .expect("first window");
+
+        cx.update(|cx| cx.request_inspector_ids());
+        for window in windows {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                assert!(window.inspector.is_none());
+                assert!(!window.inspector_elements().is_empty(), "elements reported");
+            })
+            .expect("requested window");
+        }
+    }
+
+    struct ClickableTestView;
+
+    impl Render for ClickableTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().id("clickable").size(px(10.)).on_click(|_, _, _| {})
         }
     }
 

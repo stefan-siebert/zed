@@ -307,7 +307,7 @@ impl<E: Element> Drawable<E> {
                 let inspector_id;
                 #[cfg(any(feature = "inspector", debug_assertions))]
                 {
-                    inspector_id = if window.inspector_enabled() {
+                    inspector_id = if window.inspector_enabled(cx) {
                         self.element
                             .source_location()
                             .map(|source| prepare_inspector_id(source, window))

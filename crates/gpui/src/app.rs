@@ -814,6 +814,10 @@ pub struct App {
     pub(crate) inspector_renderer: Option<crate::InspectorRenderer>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_element_registry: InspectorElementRegistry,
+    /// Set by [`App::request_inspector_ids`]: build inspector element ids in
+    /// every window, not just in one whose inspector is open.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) inspector_ids_requested: bool,
     #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub(crate) name: Option<&'static str>,
     pub(crate) text_rendering_mode: Rc<Cell<TextRenderingMode>>,
@@ -923,6 +927,8 @@ impl App {
                 inspector_renderer: None,
                 #[cfg(any(feature = "inspector", debug_assertions))]
                 inspector_element_registry: InspectorElementRegistry::default(),
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                inspector_ids_requested: false,
                 quit_mode: QuitMode::default(),
                 quitting: false,
                 cursor_hide_mode: CursorHideMode::default(),
@@ -2855,6 +2861,20 @@ impl App {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn set_inspector_renderer(&mut self, f: crate::InspectorRenderer) {
         self.inspector_renderer = Some(f);
+    }
+
+    /// Build inspector element ids in every window, whether or not its
+    /// inspector is open.
+    ///
+    /// Upstream builds them only while a window's own inspector is open
+    /// (zed #64309, for runtime cost). An *external* inspector — the MCP
+    /// server in gpui-component — reads element ids, hitboxes and painted
+    /// text from windows whose built-in inspector never opens; without this
+    /// every one of them reported an empty tree (fork, 2026-09-29).
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn request_inspector_ids(&mut self) {
+        self.inspector_ids_requested = true;
+        self.refresh_windows();
     }
 
     /// Registers a renderer specific to an inspector state.
