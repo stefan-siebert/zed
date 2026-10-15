@@ -3236,6 +3236,12 @@ pub struct KeystrokeEvent {
 
     /// The context stack at the time
     pub context_stack: Vec<KeyContext>,
+
+    /// Whether the key is held and this is the platform's auto-repeat, as
+    /// [`KeyDownEvent::is_held`](crate::KeyDownEvent::is_held) says. An
+    /// interceptor that toggles something on a key needs it: without it a
+    /// held key reads as a fast series of fresh presses.
+    pub is_held: bool,
 }
 
 struct NullHttpClient;

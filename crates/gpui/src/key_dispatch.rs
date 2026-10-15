@@ -1581,6 +1581,33 @@ mod tests {
     }
 
     #[crate::test]
+    fn test_interceptors_see_auto_repeat(cx: &mut TestAppContext) {
+        let (cx, _, _) = setup_pending_input_test(
+            cx,
+            [KeyBinding::new("f1", TestAction, Some("Terminal"))],
+        );
+        let held = Rc::new(RefCell::new(Vec::new()));
+        let _interceptor = cx.update(|_, cx| {
+            cx.intercept_keystrokes({
+                let held = held.clone();
+                move |event, _, _| held.borrow_mut().push(event.is_held)
+            })
+        });
+
+        // A press, then the platform's auto-repeat of the same key.
+        let f1 = Keystroke::parse("f1").expect("valid keystroke");
+        for is_held in [false, true] {
+            cx.simulate_event(crate::KeyDownEvent {
+                keystroke: f1.clone(),
+                is_held,
+                prefer_character_input: false,
+            });
+        }
+
+        assert_eq!(held.borrow().as_slice(), &[false, true]);
+    }
+
+    #[crate::test]
     fn test_consumed_modifier_preserves_pending_input(cx: &mut TestAppContext) {
         let (test, cx) = cx.add_window_view(|_, cx| PendingTextInputTestView::new(cx));
         test.update_in(cx, |test, window, cx| {
