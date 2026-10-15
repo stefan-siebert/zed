@@ -154,6 +154,12 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 | `6d13b23a` | Keep unshifted key + shift modifier in `get_keystroke_key` |
 | `01ff34dd` | Drop shift modifier on keybinding side after shifted-key substitution |
 
+## 6a. Auto-repeat reaches keystroke interceptors
+
+| Commit | Change |
+|---|---|
+| `7e5be29d` | **`KeystrokeEvent::is_held`.** `KeyDownEvent::is_held` is set by every platform but was dropped before `intercept_keystrokes` / `observe_keystrokes`, so an interceptor could not tell a held key's auto-repeat from fresh presses. Elane's F-key prefix (an interceptor that arms on Esc and flips switches on the arrows) flickered on a held key. Test: `key_dispatch::test_interceptors_see_auto_repeat`. |
+
 ## 6b. Keypad key names (Windows + macOS)
 
 | Commit | Change |
