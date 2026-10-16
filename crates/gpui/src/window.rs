@@ -5666,11 +5666,25 @@ impl Window {
     /// Dispatch a given keystroke as though the user had typed it.
     /// You can create a keystroke with Keystroke::parse("").
     pub fn dispatch_keystroke(&mut self, keystroke: Keystroke, cx: &mut App) -> bool {
+        self.dispatch_key_down(keystroke, false, cx)
+    }
+
+    /// Dispatch a given keystroke as the platform's auto-repeat of a held key:
+    /// the same key-down as [`Self::dispatch_keystroke`], with
+    /// [`KeyDownEvent::is_held`] set, so interceptors and observers see
+    /// [`KeystrokeEvent::is_held`]. A tool that simulates holding a key sends
+    /// one [`Self::dispatch_keystroke`], then this once per repeat, then the
+    /// key-up.
+    pub fn dispatch_keystroke_repeat(&mut self, keystroke: Keystroke, cx: &mut App) -> bool {
+        self.dispatch_key_down(keystroke, true, cx)
+    }
+
+    fn dispatch_key_down(&mut self, keystroke: Keystroke, is_held: bool, cx: &mut App) -> bool {
         let keystroke = keystroke.with_simulated_ime();
         let result = self.dispatch_event(
             PlatformInput::KeyDown(KeyDownEvent {
                 keystroke: keystroke.clone(),
-                is_held: false,
+                is_held,
                 prefer_character_input: false,
             }),
             cx,
