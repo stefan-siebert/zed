@@ -159,6 +159,7 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 | Commit | Change |
 |---|---|
 | `7e5be29d` | **`KeystrokeEvent::is_held`.** `KeyDownEvent::is_held` is set by every platform but was dropped before `intercept_keystrokes` / `observe_keystrokes`, so an interceptor could not tell a held key's auto-repeat from fresh presses. Elane's F-key prefix (an interceptor that arms on Esc and flips switches on the arrows) flickered on a held key. Test: `key_dispatch::test_interceptors_see_auto_repeat`. |
+| `1a9a042ff7` | **`Window::dispatch_keystroke_repeat`.** The same key-down as `dispatch_keystroke`, with `is_held: true` — what a tool simulating a held key sends per repeat (gpui-mcp's `send_key` with `repeat`, answered in gpui-component's `mcp.rs`). Test: `key_dispatch::test_dispatch_keystroke_repeat_is_held`. |
 
 ## 6b. Keypad key names (Windows + macOS)
 
