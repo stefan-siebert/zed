@@ -507,6 +507,13 @@ struct Quad {
     Hsla border_color;
     Corners corner_radii;
     Edges border_widths;
+    // The rest of `gpui::Quad`, unused here (the glow is drawn on macOS
+    // only), but part of its stride: without them every quad after the first
+    // is read from the wrong offset — garbage bounds and colours under DXVK,
+    // which takes the stride from the shader (2026-10-19).
+    uint effect_type;
+    uint effect_pad;
+    float4 effect_params;
 };
 
 struct QuadVertexOutput {

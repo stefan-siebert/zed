@@ -471,23 +471,12 @@ impl DirectWriteState {
         } else {
             gpui::font_name_with_fallbacks_shared(&family, &system_ui_font_name)
         };
-        let fontset = unsafe { collection.GetFontSet().log_err()? };
         let font_family_h = HSTRING::from(family.as_str());
-        let font = unsafe {
-            fontset
-                .GetMatchingFonts(
-                    &font_family_h,
-                    font_weight_to_dwrite(weight),
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    font_style_to_dwrite(style),
-                )
-                .log_err()?
+        let font_faces = unsafe {
+            Self::matching_font_faces(collection, &font_family_h, weight, style).log_err()?
         };
-        let total_number = unsafe { font.GetFontCount() };
-        for index in 0..total_number {
+        for font_face in font_faces {
             let res = maybe!({
-                let font_face_ref = unsafe { font.GetFontFaceReference(index).log_err()? };
-                let font_face = unsafe { font_face_ref.CreateFontFace().log_err()? };
                 let direct_write_features =
                     unsafe { Self::generate_font_features(factory, features).log_err()? };
                 let fallbacks = fallbacks.as_ref().and_then(|fallbacks| {
@@ -509,6 +498,58 @@ impl DirectWriteState {
             }
         }
         None
+    }
+
+    /// The faces of `family` in `collection` that match `weight` and
+    /// `style`, best first. Through the font set where DirectWrite 3 has
+    /// one; Wine's (11.0) answers `GetMatchingFonts` with `E_NOTIMPL`, and
+    /// there the family's first matching font is all there is.
+    unsafe fn matching_font_faces(
+        collection: &IDWriteFontCollection1,
+        family: &HSTRING,
+        weight: FontWeight,
+        style: FontStyle,
+    ) -> Result<Vec<IDWriteFontFace3>> {
+        let weight = font_weight_to_dwrite(weight);
+        let style = font_style_to_dwrite(style);
+        let from_font_set = maybe!({
+            let fonts = unsafe {
+                collection.GetFontSet()?.GetMatchingFonts(
+                    family,
+                    weight,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    style,
+                )?
+            };
+            let count = unsafe { fonts.GetFontCount() };
+            let faces = (0..count)
+                .filter_map(|index| unsafe {
+                    fonts
+                        .GetFontFaceReference(index)
+                        .and_then(|reference| reference.CreateFontFace())
+                        .log_err()
+                })
+                .collect();
+            anyhow::Ok(faces)
+        });
+        let error = match from_font_set {
+            Ok(faces) => return Ok(faces),
+            Err(error) => error,
+        };
+        let mut index = 0;
+        let mut exists = BOOL::default();
+        unsafe { collection.FindFamilyName(family, &mut index, &mut exists)? };
+        if !exists.as_bool() {
+            return Err(error.context("no such font family"));
+        }
+        let face = unsafe {
+            collection
+                .GetFontFamily(index)?
+                .GetFirstMatchingFont(weight, DWRITE_FONT_STRETCH_NORMAL, style)?
+                .CreateFontFace()?
+                .cast::<IDWriteFontFace3>()?
+        };
+        Ok(vec![face])
     }
 
     fn layout_line(

@@ -611,6 +611,10 @@ impl PrimitiveBatch {
     }
 }
 
+/// Uploaded as is into each renderer's buffer: a field added here goes into
+/// the `Quad` struct of every platform's shader too (Metal, `shaders.hlsl`,
+/// WGSL), or the stride disagrees and every quad after the first is read
+/// from the wrong offset.
 #[derive(Default, Debug, Copy, Clone)]
 #[repr(C)]
 #[expect(missing_docs)]

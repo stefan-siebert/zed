@@ -87,6 +87,7 @@ the shader preserves the target's alpha.
 | Commit | Change |
 |---|---|
 | `a9093714` | Per-element quad effects + glyph-based text glow |
+| (pending) | **Windows `shaders.hlsl` `Quad` gains `effect_type`/`effect_pad`/`effect_params`.** `a9093714` grew `gpui::Quad` by 24 bytes and left the HLSL struct as it was, so the StructuredBuffer's stride and the shader's disagreed: DXVK (Wine) reads with the shader's stride and every quad after the first came out shifted and miscoloured; native drivers mostly read with the buffer's, which is why the glitch showed only on some screens (a settings page of small theme cards). Unused on Windows, there for the stride. **Any field added to a `scene.rs` primitive goes into every platform's shader struct.** |
 | `cd841350` | Declarative `text_glow()` style property |
 | `ac6e965d` | Noise, vignette, and shimmer quad effects |
 | `e3fdf01f` | Custom shader primitives (Phase 5) |
@@ -192,6 +193,7 @@ the binding swallowed the wildcard.
 |---|---|
 | `3926b72b` | Apply embolden + blur to glow glyphs in DirectWrite |
 | `1e745ba1` | Preserve weight/style when falling back to alternative fonts |
+| (pending) | **Font lookup falls back to `FindFamilyName` → `GetFirstMatchingFont`** when `IDWriteFontSet::GetMatchingFonts` fails — Wine 11's answers `E_NOTIMPL`, and without the fallback no font resolved at all. Windows keeps the font-set path. |
 
 ## 8. Window / hover / resize behavior
 
@@ -242,6 +244,12 @@ the binding swallowed the wildcard.
 | Commit | Change |
 |---|---|
 | (pending) | **`on_hit_test_window_control`: answer re-entrant hit tests from a cache instead of erroring.** WM_NCHITTEST arrives synchronously while the App RefCell may already be borrowed (input dispatch, draw — easy to hit with continuously-animating content like video). The cursor cannot have moved within the re-entrant call, so the last successful answer is exact; previously this logged "RefCell already borrowed" and degraded the hit test to `None`. Additionally the `request_frame` callback's updates now use `log_err_with_backtrace()` — when the frame message is delivered re-entrantly, the failure stack names whoever pumped the message queue. `ResultExt::log_err_with_backtrace` appends a `Backtrace::force_capture()` at the log site whenever the error carries no captured backtrace (anyhow only captures at *construction*, gated on `RUST_[LIB_]BACKTRACE`, and std caches that env lookup on first use — so env arming is fragile); sync-result log sites share the error's construction stack, so the fallback stack is the real one. This is what identified Elane's `IMFMediaEngine::Shutdown`-in-`Player::drop` as the message-queue pumper. |
+
+## 12d. Running under Wine (Windows)
+
+| Commit | Change |
+|---|---|
+| (pending) | **Direct Manipulation is optional**: a window whose `DirectManipulationHandler` cannot be created (Wine has none) logs it and goes on; touchpad gestures then arrive as wheel messages. With `GPUI_DISABLE_DIRECT_COMPOSITION=1` and the two font/quad fixes above, a debug build runs under Wine 11 + DXVK (Elane, 2026-10-19). |
 
 ## 13. Docs
 
