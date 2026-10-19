@@ -105,6 +105,10 @@ impl WindowsWindowInner {
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
             WM_SIZE => self.handle_size_msg(wparam, lparam),
+            // The swap chain covers the whole client area; erasing it with the
+            // class brush first only shows as a black flash on every resize
+            // where a GDI surface exists (no DirectComposition, e.g. Wine).
+            WM_ERASEBKGND => Some(1),
             WM_GETMINMAXINFO => self.handle_get_min_max_info_msg(lparam),
             WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => self.handle_size_move_loop(handle),
             WM_EXITSIZEMOVE | WM_EXITMENULOOP => self.handle_size_move_loop_exit(handle),
@@ -820,6 +824,14 @@ impl WindowsWindowInner {
             return None;
         }
 
+        // Under Wine nothing hides the resize frame DefWindowProc leaves on
+        // the left, right and bottom: it is drawn, white. The whole window is
+        // client area there, and `handle_hit_test_msg` places the resize
+        // edges inside it.
+        if running_under_wine() {
+            return Some(0);
+        }
+
         unsafe {
             let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
             let saved_top = (*params).rgrc[0].top;
@@ -1039,6 +1051,11 @@ impl WindowsWindowInner {
         };
 
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
+        if running_under_wine() {
+            return self
+                .wine_resize_edge(handle, cursor_point, frame_x, frame_y)
+                .or(drag_area);
+        }
         if self.is_resizable
             && !self.state.is_maximized()
             && 0 <= cursor_point.y
@@ -1062,6 +1079,39 @@ impl WindowsWindowInner {
         }
 
         drag_area
+    }
+
+    /// Under Wine the window has no frame at all (`handle_calc_client_size`),
+    /// so its resize edges lie inside the client area: `frame_x`/`frame_y`
+    /// wide along every side.
+    fn wine_resize_edge(
+        &self,
+        handle: HWND,
+        point: POINT,
+        frame_x: i32,
+        frame_y: i32,
+    ) -> Option<isize> {
+        if !self.is_resizable || self.state.is_maximized() {
+            return None;
+        }
+        let mut rect = RECT::default();
+        unsafe { GetClientRect(handle, &mut rect) }.log_err()?;
+        let left = point.x < frame_x;
+        let right = point.x >= rect.right - frame_x;
+        let top = point.y < frame_y;
+        let bottom = point.y >= rect.bottom - frame_y;
+        let edge = match (top, bottom, left, right) {
+            (true, _, true, _) => HTTOPLEFT,
+            (true, _, _, true) => HTTOPRIGHT,
+            (_, true, true, _) => HTBOTTOMLEFT,
+            (_, true, _, true) => HTBOTTOMRIGHT,
+            (true, _, _, _) => HTTOP,
+            (_, true, _, _) => HTBOTTOM,
+            (_, _, true, _) => HTLEFT,
+            (_, _, _, true) => HTRIGHT,
+            _ => return None,
+        };
+        Some(edge as _)
     }
 
     fn handle_nc_mouse_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {

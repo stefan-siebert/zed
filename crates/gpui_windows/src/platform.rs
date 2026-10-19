@@ -228,8 +228,11 @@ impl WindowsPlatform {
             .context("CreateWindowExW did not run correctly")?;
         let handle = result?;
 
+        // Wine has no compositor and DXVK no `CreateSwapChainForComposition`
+        // (E_NOTIMPL), so there the window renders without it, as asked.
         let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
-            .is_ok_and(|value| value == "true" || value == "1");
+            .is_ok_and(|value| value == "true" || value == "1")
+            || running_under_wine();
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
         let foreground_executor = ForegroundExecutor::new(dispatcher);
 

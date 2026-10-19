@@ -249,7 +249,9 @@ the binding swallowed the wildcard.
 
 | Commit | Change |
 |---|---|
-| (pending) | **Direct Manipulation is optional**: a window whose `DirectManipulationHandler` cannot be created (Wine has none) logs it and goes on; touchpad gestures then arrive as wheel messages. With `GPUI_DISABLE_DIRECT_COMPOSITION=1` and the two font/quad fixes above, a debug build runs under Wine 11 + DXVK (Elane, 2026-10-19). |
+| (pending) | **Under Wine (`ntdll!wine_get_version`): no DirectComposition, no frame.** Wine's `dcomp` is three `E_NOTIMPL` stubs and DXVK's `CreateSwapChainForComposition` is unimplemented (Proton and GE-Proton the same, checked 2026-10-19), so the window renders without it unasked. Nothing hides the resize frame `DefWindowProc` leaves left/right/bottom there — it was drawn white — so the whole window is client area and the resize edges are hit-tested inside it. |
+| (pending) | **`WM_ERASEBKGND` is not erased.** Upstream too: the class brush is black and erasing showed as a black flash on every resize wherever the window has a GDI surface — without DirectComposition (Wine, `GPUI_DISABLE_DIRECT_COMPOSITION=1`). With it the window has none (`WS_EX_NOREDIRECTIONBITMAP`) and nothing changes. |
+| (pending) | **Direct Manipulation is optional**: a window whose `DirectManipulationHandler` cannot be created (Wine has none) logs it and goes on; touchpad gestures then arrive as wheel messages. With the rows above and the font/quad fixes, a debug build runs under Wine 11 + DXVK (Elane, 2026-10-19). |
 
 ## 13. Docs
 

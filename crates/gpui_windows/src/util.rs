@@ -174,6 +174,20 @@ fn is_color_light(color: &Color) -> bool {
     ((5 * color.G as u32) + (2 * color.R as u32) + color.B as u32) > (8 * 128)
 }
 
+/// Whether this process runs under Wine: its `ntdll` exports
+/// `wine_get_version`, which no Windows `ntdll` has. Wine has no DWM, so
+/// what DWM hides on Windows — the resize frame of a window without a title
+/// bar — it draws.
+pub(crate) fn running_under_wine() -> bool {
+    static UNDER_WINE: OnceLock<bool> = OnceLock::new();
+    *UNDER_WINE.get_or_init(|| unsafe {
+        use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+        GetModuleHandleA(windows::core::s!("ntdll.dll")).is_ok_and(|ntdll| {
+            GetProcAddress(ntdll, windows::core::s!("wine_get_version")).is_some()
+        })
+    })
+}
+
 pub(crate) fn with_dll_library<R, F>(dll_name: PCSTR, f: F) -> Result<R>
 where
     F: FnOnce(HMODULE) -> Result<R>,
