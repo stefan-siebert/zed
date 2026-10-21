@@ -256,6 +256,12 @@ the binding swallowed the wildcard.
 | `c94d338b` | Propagate `map_window` error instead of `unwrap` |
 | `1a88f2c2` | (macOS) `WindowBackgroundAppearance::Blurred`: drop upstream's `NSVisualEffectView` path entirely and use the WindowServer blur (`CGSSetWindowBackgroundBlurRadius(80)`, upstream's pre-Monterey-only path) on all macOS versions. On macOS 26 the materials are unusable for a colorless backdrop: the reworked layer tree renders BLACK under upstream's `updateLayer` tint-stripping, and an untinted `UnderWindowBackground` material fogs the desktop almost completely (~4% transmission measured under Elane's Liquid-Glass chrome vs ~20% with the colorless CGS blur, 2026-07-27). The CGS API still works on macOS 26 (verified visually, same API iTerm2 uses) and leaves tinting to the app's translucent fills |
 
+## 8a. Quit requests the platform makes (macOS)
+
+| Commit | Change |
+|---|---|
+| `c9a32bd3` | **`App::on_should_quit(handler)`**, answered by `applicationShouldTerminate:`. macOS ends an app on its own on the Dock's Quit, at logout and at shutdown; upstream does not implement the delegate method, so AppKit's default `NSTerminateNow` applied and an app could not refuse. `Platform::on_should_quit` (default: ignore — Windows/Linux have no such question) registers the callback; `gpui_macos` returns `NSTerminateCancel` when it says no. One handler returning `false` keeps the app running. `App::quit` sets `quit_requested` first: on macOS it ends in the same `terminate:`, and the quit the app asked for itself must not be refused. A borrowed `AppCell` when AppKit asks lets the quit through, as before. Test: `app::test::should_quit_asks_the_handlers_until_the_app_quits`. Elane refuses while file operations run and asks as on Cmd+Q (`MainWindow::allow_platform_quit`). |
+
 ## 9. Image handling
 
 | Commit | Change |
