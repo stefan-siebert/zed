@@ -1831,10 +1831,13 @@ impl WgpuRendererCore {
                 usage: wgpu::BufferUsages::UNIFORM,
                 mapped_at_creation: true,
             });
-            params_buffer
-                .slice(..)
-                .get_mapped_range_mut()
-                .copy_from_slice(bytemuck::bytes_of(&params));
+            match params_buffer.slice(..).get_mapped_range_mut() {
+                Ok(mut mapped) => mapped.copy_from_slice(bytemuck::bytes_of(&params)),
+                Err(err) => {
+                    log::warn!("dmabuf surface params buffer could not be mapped: {err}");
+                    continue;
+                }
+            }
             params_buffer.unmap();
 
             let bind_group = resources
@@ -2091,7 +2094,7 @@ fn fs_custom(input: CustomVarying) -> @location(0) vec4<f32> {{
             .map_err(|error| anyhow::anyhow!("GPU buffer map channel closed: {error}"))?
             .map_err(|error| anyhow::anyhow!("GPU buffer map failed: {error}"))?;
 
-        let mapped_data = readback_buffer.slice(..).get_mapped_range();
+        let mapped_data = readback_buffer.slice(..).get_mapped_range()?;
         let mut pixels = Vec::with_capacity((bytes_per_row as usize) * (height as usize));
         for row in mapped_data
             .chunks_exact(padded_bytes_per_row as usize)

@@ -22,7 +22,10 @@ pub(crate) fn import_dmabuf_texture(
     frame: &DmabufFrame,
 ) -> Result<wgpu::Texture> {
     if frame.fourcc != DRM_FOURCC_NV12 {
-        bail!("unsupported dmabuf fourcc {:#010x} (only NV12)", frame.fourcc);
+        bail!(
+            "unsupported dmabuf fourcc {:#010x} (only NV12)",
+            frame.fourcc
+        );
     }
     if frame.planes.is_empty() || frame.planes.len() > 2 {
         bail!("unsupported dmabuf plane count {}", frame.planes.len());
@@ -200,6 +203,13 @@ pub(crate) fn import_dmabuf_texture(
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
+            // What wgpu hard-coded before it took the state as a parameter
+            // (wgpu #9496): the image was created here in
+            // `ImageLayout::UNDEFINED`, so that is its tracker state.
+            wgpu::TextureUses::UNINITIALIZED,
+            // The decoder wrote the frame before it reached us; the texture
+            // has no clear mode, so it must not be marked for a lazy clear.
+            true,
         )
     };
     Ok(texture)

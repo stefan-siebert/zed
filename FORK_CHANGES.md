@@ -306,6 +306,19 @@ Verified 2026-10-21 on macOS (`runtime_shaders`, no Metal toolchain on the Mac m
 392 passed, `cargo test -p gpui_apple --features runtime_shaders` 12 passed (custom-shader pixel tests included).
 Windows and Linux backends are compiled by Elane's `cargo xtask check-windows` / the Linux CI lane, not here.
 
+**Linux follow-up (2026-10-22).** The merge did not compile on Linux — the Mac never builds `gpui_wgpu`
+or `gpui_linux` — because the fork's own code there had not moved with upstream:
+
+| Was | Is |
+|---|---|
+| `DeviceDescriptor { … }` (the dmabuf device from `create_device_from_hal`) | Needs `default_queue: wgpu::QueueDescriptor::default()`, as upstream's own descriptor. |
+| `create_texture_from_hal(hal, &desc)` (dmabuf import) | `(hal, &desc, initial_state, cleared)` (wgpu #9496). `TextureUses::UNINITIALIZED` — what wgpu hard-coded before, the image is created in `ImageLayout::UNDEFINED` — and `cleared: true`: the decoder wrote the frame, the texture has no clear mode. |
+| `get_mapped_range{,_mut}()` → view | → `Result<_, MapRangeError>`. `read_texture` propagates it; `draw_surfaces` logs and skips that frame, as for a failed import. |
+| `state.renderer.register_custom_shader` / `render_to_image` / `supports_dmabuf_surfaces` / `supported_dmabuf_formats` (Wayland and X11) | Through the `Option`: it is `None` only after the window closed — no shader, an error, no dmabuf. |
+
+Verified on Linux (Fedora, Wayland, `cage` headless): Elane's workspace clippy clean, 4646 tests pass, an H.264
+preview plays and the inspector's screenshot (`render_to_image`) works.
+
 ---
 
 

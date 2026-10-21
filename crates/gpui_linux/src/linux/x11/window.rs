@@ -1784,12 +1784,22 @@ impl PlatformWindow for X11Window {
 
     fn register_custom_shader(&self, wgsl_fragment: &str, label: &str) -> Option<CustomShaderId> {
         let mut inner = self.0.state.borrow_mut();
-        Some(inner.renderer.register_custom_shader(wgsl_fragment, label))
+        // The renderer is gone only once the window is closed.
+        Some(
+            inner
+                .renderer
+                .as_mut()?
+                .register_custom_shader(wgsl_fragment, label),
+        )
     }
 
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         let mut inner = self.0.state.borrow_mut();
-        inner.renderer.render_to_image(scene)
+        inner
+            .renderer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the window is closed; its renderer is gone"))?
+            .render_to_image(scene)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -1991,11 +2001,22 @@ impl PlatformWindow for X11Window {
     }
 
     fn supports_dmabuf_surfaces(&self) -> bool {
-        self.0.state.borrow().renderer.supports_dmabuf_surfaces()
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.supports_dmabuf_surfaces())
     }
 
     fn supported_dmabuf_formats(&self) -> Vec<gpui::DmabufFormat> {
-        self.0.state.borrow().renderer.supported_dmabuf_formats()
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.supported_dmabuf_formats())
+            .unwrap_or_default()
     }
 
     fn play_system_bell(&self) {

@@ -34,12 +34,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
 use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, CustomShaderId, Decorations, DevicePixels, ExternalDragPayload,
-    FrameRequestSource, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
-    PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowDecorations,
-    WindowKind, WindowParams, WindowVisibility,
+    AnyWindowHandle, Bounds, Capslock, CustomShaderId, Decorations, DevicePixels,
+    ExternalDragPayload, FrameRequestSource, GpuSpecs, Modifiers, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
+    WindowDecorations, WindowKind, WindowParams, WindowVisibility,
     layer_shell::{Anchor, LayerShellNotSupportedError},
     popup::PopupOptions,
     px, size,
@@ -2196,12 +2196,22 @@ impl PlatformWindow for WaylandWindow {
 
     fn register_custom_shader(&self, wgsl_fragment: &str, label: &str) -> Option<CustomShaderId> {
         let mut state = self.borrow_mut();
-        Some(state.renderer.register_custom_shader(wgsl_fragment, label))
+        // The renderer is gone only once the window is closed.
+        Some(
+            state
+                .renderer
+                .as_mut()?
+                .register_custom_shader(wgsl_fragment, label),
+        )
     }
 
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         let mut state = self.borrow_mut();
-        state.renderer.render_to_image(scene)
+        state
+            .renderer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the window is closed; its renderer is gone"))?
+            .render_to_image(scene)
     }
 
     // Replaces the fork's `completed_frame`, which upstream removed with the
@@ -2373,11 +2383,18 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn supports_dmabuf_surfaces(&self) -> bool {
-        self.borrow().renderer.supports_dmabuf_surfaces()
+        self.borrow()
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.supports_dmabuf_surfaces())
     }
 
     fn supported_dmabuf_formats(&self) -> Vec<gpui::DmabufFormat> {
-        self.borrow().renderer.supported_dmabuf_formats()
+        self.borrow()
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.supported_dmabuf_formats())
+            .unwrap_or_default()
     }
 
     fn play_system_bell(&self) {

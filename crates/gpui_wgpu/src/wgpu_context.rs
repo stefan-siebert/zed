@@ -537,9 +537,11 @@ impl WgpuContext {
                     required_features,
                     required_limits,
                     &wgpu::MemoryHints::MemoryUsage,
-                    Some(Box::new(|args: wgpu::hal::vulkan::CreateDeviceCallbackArgs| {
-                        args.extensions.push(DRM_MODIFIER_EXT);
-                    })),
+                    Some(Box::new(
+                        |args: wgpu::hal::vulkan::CreateDeviceCallbackArgs| {
+                            args.extensions.push(DRM_MODIFIER_EXT);
+                        },
+                    )),
                 )
                 .map_err(|err| {
                     log::warn!("Vulkan hal device open failed ({err:?}); dmabuf import disabled")
@@ -558,6 +560,7 @@ impl WgpuContext {
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                     trace: wgpu::Trace::Off,
                     experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    default_queue: wgpu::QueueDescriptor::default(),
                 },
             )
         }
@@ -626,8 +629,7 @@ impl WgpuContext {
             if count == 0 {
                 return Vec::new();
             }
-            let mut modifiers =
-                vec![ash::vk::DrmFormatModifierPropertiesEXT::default(); count];
+            let mut modifiers = vec![ash::vk::DrmFormatModifierPropertiesEXT::default(); count];
             let mut modifier_list = ash::vk::DrmFormatModifierPropertiesListEXT::default()
                 .drm_format_modifier_properties(&mut modifiers);
             let mut properties =
