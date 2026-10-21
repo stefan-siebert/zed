@@ -18,6 +18,48 @@ git diff --stat $(git merge-base HEAD upstream/main)..gpui-mcp-patches-v2
 
 Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style without a PR number.
 
+## Which upstream commit to merge (decided 2026-10-22)
+
+**Not Zed's `main` — the Zed commit gpui-component builds against.** Upstream
+gpui-component (longbridge) does not follow Zed's `main`: it depends on
+`gpui-pre` from crates.io, a weekly snapshot of Zed published by its
+maintainers, and moves to the next one within days. Merging Zed's `main`
+put this fork 125 Zed commits ahead of that (2026-10-21, `5adae449` against
+`gpui-pre 0.3.9` = `zed@93d7456`): gpui-component then used APIs Zed had
+already renamed (`ScrollWheelEvent` → `ScrollEvent`, #65805; 118 deprecation
+warnings), and longbridge had nothing to fix — for them the rename did not
+exist yet. On the same commit, a gpui-component merge compiles against
+exactly the gpui its upstream compiled against.
+
+Find the commit:
+
+```bash
+git -C ../gpui-component fetch upstream
+VERSION=$(git -C ../gpui-component show upstream/main:Cargo.toml \
+  | sed -n 's/^gpui = { package = "gpui-pre", version = "=\([^"]*\)".*/\1/p')
+curl -s -A elane https://crates.io/api/v1/crates/gpui-pre/$VERSION \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"]["description"])'
+# → "… (gpui-pre snapshot of zed@93d7456)": merge that commit, not upstream/main
+```
+
+Rules:
+
+- **Both forks in one pass, gpui-fork first** (gpui-component tracks the
+  gpui it is built with): gpui-fork merges `zed@<snapshot>`, gpui-component
+  merges `upstream/main`, then Elane raises both floors in `siblings.toml`.
+- **Never move backwards** to reach a snapshot: if the fork is already
+  past it, wait until gpui-component's `gpui-pre` overtakes the fork.
+- **An upstream fix that cannot wait** is cherry-picked onto the fork on its
+  own, with its PR number kept in the subject, not pulled in by merging
+  `main`.
+- **A merge made on a Mac is not done until Linux and Windows compile** —
+  the Mac builds neither `gpui_wgpu` nor `gpui_linux`, and the 2026-10-21
+  merge broke Linux that way (§15, Linux follow-up). Windows: Elane's
+  `cargo xtask check-windows` runs on the Mac too. Linux: only on a Linux
+  machine (or WSL) — Elane's `cargo clippy --workspace --all-targets` there
+  before Elane's floor in `siblings.toml` is raised; `cargo xtask linux-ci`
+  does not run on macOS.
+
 ---
 
 ## Summary
