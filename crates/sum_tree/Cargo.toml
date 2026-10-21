@@ -16,11 +16,12 @@ doctest = false
 [dependencies]
 heapless.workspace = true
 rayon.workspace = true
-log.workspace = true
+# Fork: no ztracing/zlog — both are GPL-3.0 (9e2509d764).
 tracing.workspace = true
 proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
+log.workspace = true
 ctor.workspace = true
 rand.workspace = true
 proptest.workspace = true

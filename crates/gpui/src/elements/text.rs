@@ -613,6 +613,13 @@ impl IntoElement for StyledText {
 #[derive(Default, Clone)]
 pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
 
+#[derive(Clone, Copy)]
+enum TextPaintPass {
+    All,
+    Background,
+    Foreground,
+}
+
 struct TextLayoutInner {
     len: usize,
     lines: SmallVec<[WrappedLine; 1]>,
@@ -795,50 +802,50 @@ impl TextLayout {
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
+        // Record text content for the MCP inspector. Here rather than in
+        // `paint_lines`, the one path that knows the text: the split
+        // `paint_background`/`paint_foreground` passes record nothing.
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if let Some(bounds) = self.0.borrow().as_ref().and_then(|state| state.bounds) {
+            window.record_painted_text(bounds, text);
+        }
+        self.paint_lines(TextPaintPass::All, window, cx)
+            .with_context(|| format!("failed to paint {text}"))
+            .unwrap();
+    }
+
+    /// Paints the backgrounds of the text runs without the glyphs, so that callers can paint
+    /// content, such as highlights, between the backgrounds and the text. Follow it with
+    /// [`Self::paint_foreground`] to paint the glyphs.
+    pub fn paint_background(&self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        self.paint_lines(TextPaintPass::Background, window, cx)
+    }
+
+    /// Paints the glyphs and decorations of the text without the run backgrounds.
+    pub fn paint_foreground(&self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        self.paint_lines(TextPaintPass::Foreground, window, cx)
+    }
+
+    fn paint_lines(
+        &self,
+        pass: TextPaintPass,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
         let element_state = self.0.borrow();
         let element_state = element_state
             .as_ref()
-            .with_context(|| format!("measurement has not been performed on {text}"))
-            .unwrap();
+            .context("measurement has not been performed")?;
         let bounds = element_state
             .bounds
-            .with_context(|| format!("prepaint has not been performed on {text}"))
-            .unwrap();
-
-        // Record text content for the MCP inspector
-        #[cfg(any(feature = "inspector", debug_assertions))]
-        window.record_painted_text(bounds, text);
+            .context("prepaint has not been performed")?;
 
         let line_height = element_state.line_height;
         let mut line_origin = bounds.origin;
         let text_style = window.text_style();
         for line in &element_state.lines {
-            line.paint_background(
-                line_origin,
-                line_height,
-                text_style.text_align,
-                Some(bounds),
-                window,
-                cx,
-            )
-            .log_err();
-            if let Some(glow) = &text_style.glow {
-                line.paint_with_glow(
-                    line_origin,
-                    line_height,
-                    text_style.text_align,
-                    Some(bounds),
-                    glow.color,
-                    crate::GlowParams {
-                        embolden: glow.embolden,
-                        blur_radius: glow.blur_radius,
-                    },
-                    window,
-                    cx,
-                )
-                .log_err();
-            } else {
-                line.paint(
+            if matches!(pass, TextPaintPass::All | TextPaintPass::Background) {
+                line.paint_background(
                     line_origin,
                     line_height,
                     text_style.text_align,
@@ -848,8 +855,37 @@ impl TextLayout {
                 )
                 .log_err();
             }
+            if matches!(pass, TextPaintPass::All | TextPaintPass::Foreground) {
+                if let Some(glow) = &text_style.glow {
+                    line.paint_with_glow(
+                        line_origin,
+                        line_height,
+                        text_style.text_align,
+                        Some(bounds),
+                        glow.color,
+                        crate::GlowParams {
+                            embolden: glow.embolden,
+                            blur_radius: glow.blur_radius,
+                        },
+                        window,
+                        cx,
+                    )
+                    .log_err();
+                } else {
+                    line.paint(
+                        line_origin,
+                        line_height,
+                        text_style.text_align,
+                        Some(bounds),
+                        window,
+                        cx,
+                    )
+                    .log_err();
+                }
+            }
             line_origin.y += line.size(line_height).height;
         }
+        Ok(())
     }
 
     /// Get the byte index into the input of the pixel position.
