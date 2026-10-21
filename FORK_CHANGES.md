@@ -2,7 +2,7 @@
 
 **Fork:** `stefan-siebert/zed`, branch `gpui-mcp-patches-v2`
 **Built from:** local checkout `../gpui-fork` (overrides the git dep via Cargo `[patch]` in Elane's `Cargo.toml`).
-**Baseline:** upstream Zed merged at commit `933d8d93` (merge commit `3f66c9e1`, 2026-09-25).
+**Baseline:** upstream Zed merged at commit `5adae449` (merge commit `77cfef62`, 2026-10-21; previous: `933d8d93` / `3f66c9e1`, 2026-09-25).
 
 This file inventories the **custom commits on top of upstream**. Everything else on the branch is upstream PRs pulled in by merges.
 
@@ -22,7 +22,7 @@ Upstream PRs are tagged `(#NNNNN)`; custom patches use conventional-commit style
 
 ## Summary
 
-**70 custom commits**, net **+6,685 / −383 lines across 69 files** vs the upstream merge point (`933d8d93`, measured 2026-09-25).
+**84 custom commits**, net **+7,217 / −475 lines across 74 files** vs the upstream merge point (`5adae449`, measured 2026-10-21 after the merge commit and its follow-ups).
 
 Both figures come straight from the commands above; re-run them after every
 upstream merge, and move the baseline commit with them. Counting against
@@ -32,6 +32,13 @@ upstream commits that carry no PR number.
 ⚠️ These forks are load-bearing (see Elane `CLAUDE.md`). `cargo update` against upstream will break the shader, inspector, drag, and clipboard work.
 
 ---
+
+## 0. Licensing and dependency pins
+
+| Commit | Change |
+|---|---|
+| `9e2509d7` | **`sum_tree` without `ztracing`/`zlog`** — both are GPL-3.0 and would make every gpui consumer GPL (Elane's plan `2026-05-13-gpui-fork-gpl-isolation.md`). `tracing::instrument` instead; the test logger init is gone. Re-check on every merge: upstream keeps adding `ztracing` to crates gpui pulls in (from Elane: `cargo tree --workspace -i ztracing` and `-i zlog` must find no package). |
+| `09fdc7c3` | `gpui_web`: `unicode-properties = "0.1.3"` instead of upstream's unexplained `=0.1.3` pin, which cannot coexist with rustybuzz 0.20 (typst, Elane's PDF plugin). |
 
 ## 1. MCP / UI Inspector APIs (original purpose of the fork)
 
@@ -48,7 +55,7 @@ upstream commits that carry no PR number.
 
 | Commit | Change |
 |---|---|
-| _this commit_ | **`BackdropBlur` primitive + Metal implementation.** GPUI had no backdrop-filter primitive at all: both shader paths (Metal's `quad_fragment` `effect_type` branches and the WGSL `CustomShader` contract) bind no texture, so neither can read what is already painted behind an element. Adds `BackdropBlur` to `Scene` (`bounds`, `content_mask`, `corner_radii`, `blur_radius`, `tint`), `Window::paint_backdrop_blur`, and `PlatformWindow::supports_backdrop_blur` (default `false`). `PrimitiveKind::BackdropBlur` sits **between `Shadow` and `Quad`** so a backdrop at the same draw order paints under the quad that requested it, while every existing kind keeps its relative order. macOS implements it: a dual-Kawase chain (Bjorge, ARM, SIGGRAPH 2015) on a half-resolution ping-pong pair, composited through `quad_sdf` for rounded corners. wgpu and DirectX get a no-op arm and keep reporting `false`. |
+| `e23cb9bd` | **`BackdropBlur` primitive + Metal implementation.** GPUI had no backdrop-filter primitive at all: both shader paths (Metal's `quad_fragment` `effect_type` branches and the WGSL `CustomShader` contract) bind no texture, so neither can read what is already painted behind an element. Adds `BackdropBlur` to `Scene` (`bounds`, `content_mask`, `corner_radii`, `blur_radius`, `tint`), `Window::paint_backdrop_blur`, and `PlatformWindow::supports_backdrop_blur` (default `false`). `PrimitiveKind::BackdropBlur` sits **between `Shadow` and `Quad`** so a backdrop at the same draw order paints under the quad that requested it, while every existing kind keeps its relative order. macOS implements it: a dual-Kawase chain (Bjorge, ARM, SIGGRAPH 2015) on a half-resolution ping-pong pair, composited through `quad_sdf` for rounded corners. wgpu and DirectX get a no-op arm and keep reporting `false`. |
 
 Two things this required that are easy to regress:
 
@@ -87,7 +94,7 @@ the shader preserves the target's alpha.
 | Commit | Change |
 |---|---|
 | `a9093714` | Per-element quad effects + glyph-based text glow |
-| (pending) | **Windows `shaders.hlsl` `Quad` gains `effect_type`/`effect_pad`/`effect_params`.** `a9093714` grew `gpui::Quad` by 24 bytes and left the HLSL struct as it was, so the StructuredBuffer's stride and the shader's disagreed: DXVK (Wine) reads with the shader's stride and every quad after the first came out shifted and miscoloured; native drivers mostly read with the buffer's, which is why the glitch showed only on some screens (a settings page of small theme cards). Unused on Windows, there for the stride. **Any field added to a `scene.rs` primitive goes into every platform's shader struct.** |
+| `d479e826` | **Windows `shaders.hlsl` `Quad` gains `effect_type`/`effect_pad`/`effect_params`.** `a9093714` grew `gpui::Quad` by 24 bytes and left the HLSL struct as it was, so the StructuredBuffer's stride and the shader's disagreed: DXVK (Wine) reads with the shader's stride and every quad after the first came out shifted and miscoloured; native drivers mostly read with the buffer's, which is why the glitch showed only on some screens (a settings page of small theme cards). Unused on Windows, there for the stride. **Any field added to a `scene.rs` primitive goes into every platform's shader struct.** |
 | `cd841350` | Declarative `text_glow()` style property |
 | `ac6e965d` | Noise, vignette, and shimmer quad effects |
 | `e3fdf01f` | Custom shader primitives (Phase 5) |
@@ -96,7 +103,7 @@ the shader preserves the target's alpha.
 | `f4828a22` | Restore `CustomShaders` arm in macOS metal renderer match |
 | `7b4ffb22` | Fix Point/Size field access in vignette & shimmer effects |
 | `ec534b9e` | Custom-shader instances: clear per frame + 16-byte instance stride |
-| _this commit_ | **Metal runtime for custom shaders (macOS).** The last backend without one: `register_custom_shader` returned `None` on macOS, so no `PrimitiveBatch::CustomShaders` was ever produced and the match arm was an empty `{}`. Elane's treemap cushions and its About-dialog backdrop therefore ran on the flat-fill fallback on the fork's own development platform. New `gpui_macos/src/metal_custom_shader.rs` mirrors `directx_custom_shader.rs`: the caller's `custom_effect` fragment is wrapped in the same WGSL module the other two backends use, translated to MSL with `naga` (new dependency, `wgsl-in` + `msl-out`), compiled through `newLibraryWithSource:`, and cached per `CustomShaderId`. Instances ride the existing per-frame instance buffer; a batch binds the whole array and passes `range.start` as the base instance, since Metal's `[[instance_id]]` counts from it. Blending is premultiplied, matching wgpu/DirectX rather than gpui's own straight-alpha pipelines. Three things to preserve across merges: naga demands a `sizes_buffer` for *any* runtime-sized array whatever the bounds-check policy says, so `_mslBufferSizes` is bound at `buffer(3)`; the quad is a four-vertex triangle strip derived from `[[vertex_id]]`, so this is the one pipeline here that binds no vertex buffer; and the module carries three headless pixel tests, one of which fails if the base instance is dropped. |
+| `f462812b` | **Metal runtime for custom shaders (macOS).** The last backend without one: `register_custom_shader` returned `None` on macOS, so no `PrimitiveBatch::CustomShaders` was ever produced and the match arm was an empty `{}`. Elane's treemap cushions and its About-dialog backdrop therefore ran on the flat-fill fallback on the fork's own development platform. New `gpui_macos/src/metal_custom_shader.rs` mirrors `directx_custom_shader.rs`: the caller's `custom_effect` fragment is wrapped in the same WGSL module the other two backends use, translated to MSL with `naga` (new dependency, `wgsl-in` + `msl-out`), compiled through `newLibraryWithSource:`, and cached per `CustomShaderId`. Instances ride the existing per-frame instance buffer; a batch binds the whole array and passes `range.start` as the base instance, since Metal's `[[instance_id]]` counts from it. Blending is premultiplied, matching wgpu/DirectX rather than gpui's own straight-alpha pipelines. Three things to preserve across merges: naga demands a `sizes_buffer` for *any* runtime-sized array whatever the bounds-check policy says, so `_mslBufferSizes` is bound at `buffer(3)`; the quad is a four-vertex triangle strip derived from `[[vertex_id]]`, so this is the one pipeline here that binds no vertex buffer; and the module carries three headless pixel tests, one of which fails if the base instance is dropped. |
 | `0f18336c` | **Text glow on macOS.** `gpui_macos`'s CoreGraphics rasterizer ignored `RenderGlyphParams::embolden`, so glow glyphs rasterized as plain sharp glyphs painted underneath the foreground pass — fully occluded, i.e. `text_glow()` silently did nothing on macOS (Elane titlebar wordmark). The mask-space glow post-processing (`glow_padding_pixels` / `embolden_alpha_mask` / `blur_alpha_mask`), previously duplicated across `gpui_windows/direct_write.rs` and `gpui_wgpu/cosmic_text_system.rs`, moved to shared `gpui/src/text_system/glow_mask.rs` (+ unit tests); both backends now import it and `gpui_macos/text_system.rs` applies it (padded `raster_bounds`, dilate + blur on the CG alpha mask, emoji path skipped). Also: `gpui`'s dev-dependency on `gpui_platform` now enables `runtime_shaders` so `cargo test -p gpui` builds on macOS without the Xcode Metal Toolchain component. |
 
 New/large files: `gpui_windows/src/directx_custom_shader.rs` (+419), `gpui_macos/src/metal_custom_shader.rs` (+500), `gpui_wgpu/src/wgpu_renderer.rs` (+464), `shaders.wgsl`, `shaders.metal`.
@@ -166,7 +173,7 @@ New file: `gpui_windows/src/native_drag.rs` (+522).
 
 | Commit | Change |
 |---|---|
-| _this commit_ | Name the keypad's arithmetic keys apart from the main row, as the Linux backend already does |
+| `0d75da42` | Name the keypad's arithmetic keys apart from the main row, as the Linux backend already does |
 
 `gpui_windows`' `parse_immutable` maps `VK_MULTIPLY` / `VK_ADD` / `VK_SUBTRACT`
 / `VK_DIVIDE` / `VK_DECIMAL` to `"multiply"` / `"add"` / `"subtract"` /
@@ -193,7 +200,7 @@ the binding swallowed the wildcard.
 |---|---|
 | `3926b72b` | Apply embolden + blur to glow glyphs in DirectWrite |
 | `1e745ba1` | Preserve weight/style when falling back to alternative fonts |
-| (pending) | **Font lookup falls back to `FindFamilyName` → `GetFirstMatchingFont`** when `IDWriteFontSet::GetMatchingFonts` fails — Wine 11's answers `E_NOTIMPL`, and without the fallback no font resolved at all. Windows keeps the font-set path. |
+| `d479e826` | **Font lookup falls back to `FindFamilyName` → `GetFirstMatchingFont`** when `IDWriteFontSet::GetMatchingFonts` fails — Wine 11's answers `E_NOTIMPL`, and without the fallback no font resolved at all. Windows keeps the font-set path. |
 
 ## 8. Window / hover / resize behavior
 
@@ -224,14 +231,14 @@ the binding swallowed the wildcard.
 
 | Commit | Change |
 |---|---|
-| (pending) | **taffy `=0.10.1` → `=0.12.1`.** Taffy 0.10/0.11 has a layout bug: inside a `Display::Block` container that is itself an auto-sized flex item (gpui's plain `div()` default), a flex-column's percent-width child collapses to width 0 whenever a sibling subtree contains flex items with a pixel `flex_basis`. Real-world symptom: Elane's embedded terminal (`h(300).w_full()` next to resizable panels with measured `flex_basis`) rendered 1 column wide. Fixed upstream in taffy 0.12. Regression test: `taffy::tests::percent_width_child_in_block_wrapped_flex_column` (a downgrade also fails to build: `style.rs` uses taffy 0.12's `AlignItems::START` keyword consts). **When re-merging upstream zed (still pins `=0.10.1`), keep the 0.12 pin.** |
-| (pending) | `GPUI_LAYOUT_DEBUG=1` dumps every solved taffy tree (per-node style + computed layout) to stderr — replay against a standalone taffy crate to bisect engine-level layout bugs. See `TaffyLayoutEngine::compute_layout`. |
+| `1ff7083f` | **taffy `=0.10.1` → `=0.12.1`.** Taffy 0.10/0.11 has a layout bug: inside a `Display::Block` container that is itself an auto-sized flex item (gpui's plain `div()` default), a flex-column's percent-width child collapses to width 0 whenever a sibling subtree contains flex items with a pixel `flex_basis`. Real-world symptom: Elane's embedded terminal (`h(300).w_full()` next to resizable panels with measured `flex_basis`) rendered 1 column wide. Fixed upstream in taffy 0.12. Regression test: `taffy::tests::percent_width_child_in_block_wrapped_flex_column` (a downgrade also fails to build: `style.rs` uses taffy 0.12's `AlignItems::START` keyword consts). **When re-merging upstream zed (still pins `=0.10.1`), keep the 0.12 pin.** |
+| `1ff7083f` | `GPUI_LAYOUT_DEBUG=1` dumps every solved taffy tree (per-node style + computed layout) to stderr — replay against a standalone taffy crate to bisect engine-level layout bugs. See `TaffyLayoutEngine::compute_layout`. |
 
 ## 12. Zero-copy DMABuf video surfaces (Linux)
 
 | Commit | Change |
 |---|---|
-| (pending) | **Linux zero-copy video presentation.** New `gpui::DmabufFrame`/`DmabufPlane`/`DmabufFormat` types (`gpui/src/dmabuf.rs`) + `SurfaceSource::Dmabuf` arm and a Linux `surface()`/`Window::paint_surface`, resurrecting the previously macOS-only surface primitive. wgpu device creation routes through wgpu-hal `open_with_callback` to enable `VK_EXT_image_drm_format_modifier` (`external_memory_fd`/`_dma_buf` auto-added), falling back to `request_device`; `wgpu_context.rs` queries the device's importable NV12 DRM modifiers (`DrmFormatModifierPropertiesListEXT`, 2-memory-plane + SAMPLED) exposed as `Window::supported_dmabuf_formats()` for Wayland-compositor-style format negotiation with producers. New `gpui_wgpu/src/dmabuf_texture.rs` imports a frame as ONE multiplanar `VkImage` (DRM-modifier tiling, explicit plane layouts, dedicated fd import via ash) wrapped as `wgpu::TextureFormat::NV12`; the previously stubbed `PrimitiveBatch::Surfaces` draw arm samples `TextureAspect::Plane0/Plane1` views through the existing `fs_surface` pipeline. The YCbCr→RGB matrix moved from a shader constant (BT.601 full — wrong for HD) into `SurfaceParams`, supplied per frame (BT.601 full/limited, BT.709/BT.2020 limited presets). New dep: `ash 0.38` (matching wgpu-hal) on Linux. Consumer: Elane's video preview (elane-media). |
+| `463b39d6` | **Linux zero-copy video presentation.** New `gpui::DmabufFrame`/`DmabufPlane`/`DmabufFormat` types (`gpui/src/dmabuf.rs`) + `SurfaceSource::Dmabuf` arm and a Linux `surface()`/`Window::paint_surface`, resurrecting the previously macOS-only surface primitive. wgpu device creation routes through wgpu-hal `open_with_callback` to enable `VK_EXT_image_drm_format_modifier` (`external_memory_fd`/`_dma_buf` auto-added), falling back to `request_device`; `wgpu_context.rs` queries the device's importable NV12 DRM modifiers (`DrmFormatModifierPropertiesListEXT`, 2-memory-plane + SAMPLED) exposed as `Window::supported_dmabuf_formats()` for Wayland-compositor-style format negotiation with producers. New `gpui_wgpu/src/dmabuf_texture.rs` imports a frame as ONE multiplanar `VkImage` (DRM-modifier tiling, explicit plane layouts, dedicated fd import via ash) wrapped as `wgpu::TextureFormat::NV12`; the previously stubbed `PrimitiveBatch::Surfaces` draw arm samples `TextureAspect::Plane0/Plane1` views through the existing `fs_surface` pipeline. The YCbCr→RGB matrix moved from a shader constant (BT.601 full — wrong for HD) into `SurfaceParams`, supplied per frame (BT.601 full/limited, BT.709/BT.2020 limited presets). New dep: `ash 0.38` (matching wgpu-hal) on Linux. Consumer: Elane's video preview (elane-media). |
 
 ## 12b. Zero-copy shared-D3D11-texture video surfaces (Windows)
 
@@ -243,15 +250,15 @@ the binding swallowed the wildcard.
 
 | Commit | Change |
 |---|---|
-| (pending) | **`on_hit_test_window_control`: answer re-entrant hit tests from a cache instead of erroring.** WM_NCHITTEST arrives synchronously while the App RefCell may already be borrowed (input dispatch, draw — easy to hit with continuously-animating content like video). The cursor cannot have moved within the re-entrant call, so the last successful answer is exact; previously this logged "RefCell already borrowed" and degraded the hit test to `None`. Additionally the `request_frame` callback's updates now use `log_err_with_backtrace()` — when the frame message is delivered re-entrantly, the failure stack names whoever pumped the message queue. `ResultExt::log_err_with_backtrace` appends a `Backtrace::force_capture()` at the log site whenever the error carries no captured backtrace (anyhow only captures at *construction*, gated on `RUST_[LIB_]BACKTRACE`, and std caches that env lookup on first use — so env arming is fragile); sync-result log sites share the error's construction stack, so the fallback stack is the real one. This is what identified Elane's `IMFMediaEngine::Shutdown`-in-`Player::drop` as the message-queue pumper. |
+| `7e069b19` | **`on_hit_test_window_control`: answer re-entrant hit tests from a cache instead of erroring.** WM_NCHITTEST arrives synchronously while the App RefCell may already be borrowed (input dispatch, draw — easy to hit with continuously-animating content like video). The cursor cannot have moved within the re-entrant call, so the last successful answer is exact; previously this logged "RefCell already borrowed" and degraded the hit test to `None`. Additionally the `request_frame` callback's updates now use `log_err_with_backtrace()` — when the frame message is delivered re-entrantly, the failure stack names whoever pumped the message queue. `ResultExt::log_err_with_backtrace` appends a `Backtrace::force_capture()` at the log site whenever the error carries no captured backtrace (anyhow only captures at *construction*, gated on `RUST_[LIB_]BACKTRACE`, and std caches that env lookup on first use — so env arming is fragile); sync-result log sites share the error's construction stack, so the fallback stack is the real one. This is what identified Elane's `IMFMediaEngine::Shutdown`-in-`Player::drop` as the message-queue pumper. |
 
 ## 12d. Running under Wine (Windows)
 
 | Commit | Change |
 |---|---|
-| (pending) | **Under Wine (`ntdll!wine_get_version`): no DirectComposition, no frame.** Wine's `dcomp` is three `E_NOTIMPL` stubs and DXVK's `CreateSwapChainForComposition` is unimplemented (Proton and GE-Proton the same, checked 2026-10-19), so the window renders without it unasked. Nothing hides the resize frame `DefWindowProc` leaves left/right/bottom there — it was drawn white — so the whole window is client area and the resize edges are hit-tested inside it. |
-| (pending) | **`WM_ERASEBKGND` is not erased.** Upstream too: the class brush is black and erasing showed as a black flash on every resize wherever the window has a GDI surface — without DirectComposition (Wine, `GPUI_DISABLE_DIRECT_COMPOSITION=1`). With it the window has none (`WS_EX_NOREDIRECTIONBITMAP`) and nothing changes. |
-| (pending) | **Direct Manipulation is optional**: a window whose `DirectManipulationHandler` cannot be created (Wine has none) logs it and goes on; touchpad gestures then arrive as wheel messages. With the rows above and the font/quad fixes, a debug build runs under Wine 11 + DXVK (Elane, 2026-10-19). |
+| `ab9f82ab` | **Under Wine (`ntdll!wine_get_version`): no DirectComposition, no frame.** Wine's `dcomp` is three `E_NOTIMPL` stubs and DXVK's `CreateSwapChainForComposition` is unimplemented (Proton and GE-Proton the same, checked 2026-10-19), so the window renders without it unasked. Nothing hides the resize frame `DefWindowProc` leaves left/right/bottom there — it was drawn white — so the whole window is client area and the resize edges are hit-tested inside it. |
+| `ab9f82ab` | **`WM_ERASEBKGND` is not erased.** Upstream too: the class brush is black and erasing showed as a black flash on every resize wherever the window has a GDI surface — without DirectComposition (Wine, `GPUI_DISABLE_DIRECT_COMPOSITION=1`). With it the window has none (`WS_EX_NOREDIRECTIONBITMAP`) and nothing changes. |
+| `d479e826` | **Direct Manipulation is optional**: a window whose `DirectManipulationHandler` cannot be created (Wine has none) logs it and goes on; touchpad gestures then arrive as wheel messages. With the rows above and the font/quad fixes, a debug build runs under Wine 11 + DXVK (Elane, 2026-10-19). |
 
 ## 13. Docs
 
@@ -278,6 +285,27 @@ One thing to watch on the next merge: the throttled-configure early return in
 before returning. Nothing ticks on its own any more, and `resize_throttle` is
 cleared at the top of `frame()` — parking with the flag still set would skip
 every further resizing configure and freeze the window for the rest of the drag.
+## 15. What the 2026-10-21 upstream merge moved
+
+368 upstream commits (`933d8d93..5adae449`). Merge commit `77cfef62`; the full resolution list is in
+its message. The ones the next merge lands on:
+
+| Was | Is |
+|---|---|
+| `gpui_macos/src/text_system.rs` | `gpui_apple/src/text_system.rs` (shared with iOS, #65058). The glow mask post-processing (`0f18336c`) moved with it; `Hsla`/`Rgba` are imported macOS-only there. |
+| `SurfaceSource::Surface(core_video::CVPixelBuffer)` | `SurfaceSource::Surface(CFRetained<objc2_core_video::CVPixelBuffer>)` (objc2, also iOS). The fork's `Dmabuf` / `D3d11` variants sit next to it with the cfg widened to linux/windows. **Consumers change too**: Elane wraps elane-media's raw `CVPixelBufferRef` with `CFRetained::retain`. |
+| `gpui_apple` on `cocoa`/`objc` | objc2 only. Nothing of the fork used the old crates any more; `naga` (custom shaders) and `collections` stay fork deps. |
+| `layer.set_framebuffer_only(false)` unconditional | Upstream now gates it on `test-support` + debug. **Kept unconditional** — backdrop blur (§2) samples the drawable. |
+| `TextLayout::paint(text)` | Upstream split it into `paint_lines(pass)` with public `paint_background` / `paint_foreground`. Glow paints in the foreground pass. `record_painted_text` (§1) moved into `paint(text)`, the only path that knows the text — the split passes record nothing for the inspector. |
+| `KeystrokeEvent { is_held }` | Now next to upstream's `input_preference` (#64859); observer/interceptor calls pass both. |
+| macOS `Blurred` | Upstream fixed it for macOS 27 with an `UnderWindowBackground` `NSVisualEffectView` (#65361). **Not taken**: the fork measured exactly that material fogging the desktop on macOS 26 (`1a88f2c2`); the WindowServer blur stays, `BlurredView` stays unregistered. Re-measure on macOS 27 before ever switching. |
+| Wayland `state.renderer` | An `Option` upstream now. `draw()` returns before the fork's deferred drawable size / viewport are applied when there is no renderer, so they wait for the first one. `frame()` grew `(signal_at, signal_source)`; the fork's `closed` guard stays at its top. |
+| `ScrollWheelEvent` / `PlatformInput::ScrollWheel` / `on_scroll_wheel` | `ScrollEvent` (new field `source: ScrollSource`) / `PlatformInput::Scroll` / `on_scroll` (#65805). The old type names stay as deprecated aliases; the enum variant does **not** — code that constructs input events (gpui-component's `mcp.rs`, tests) must say `Scroll` and set `source`. |
+
+Verified 2026-10-21 on macOS (`runtime_shaders`, no Metal toolchain on the Mac mini): `cargo test -p gpui --lib`
+392 passed, `cargo test -p gpui_apple --features runtime_shaders` 12 passed (custom-shader pixel tests included).
+Windows and Linux backends are compiled by Elane's `cargo xtask check-windows` / the Linux CI lane, not here.
+
 ---
 
 
@@ -292,77 +320,83 @@ every further resizing configure and freeze the window for the rest of the drag.
 
 ---
 
-## Full file-level diff stat (vs `ce48461e`)
+## Full file-level diff stat (vs `5adae449`)
 ```
- ACCESSIBILITY_PLAN.md                            |  49 ++++++++
- Cargo.lock                                       |   7 +-
+ ACCESSIBILITY_PLAN.md                            |  49 +++++
+ Cargo.lock                                       |  66 +++++-
  Cargo.toml                                       |   1 +
- FORK_CHANGES.md                                  | 275 +++++++++++++++++++++++++++++++++++++++++
+ FORK_CHANGES.md                                  | 368 ++++++++++++++++++++++++++++++++
  crates/gpui/Cargo.toml                           |   4 +-
- crates/gpui/src/app.rs                           |   8 ++
- crates/gpui/src/assets.rs                        |  23 ++++
- crates/gpui/src/d3d11_surface.rs                 |  64 ++++++++++
- crates/gpui/src/dmabuf.rs                        | 135 ++++++++++++++++++++
- crates/gpui/src/elements/div.rs                  |   8 ++
- crates/gpui/src/elements/img.rs                  |  82 +++++++++++--
- crates/gpui/src/elements/surface.rs              |  56 ++++++++-
- crates/gpui/src/elements/text.rs                 |  39 ++++--
- crates/gpui/src/gpui.rs                          |   8 ++
- crates/gpui/src/platform.rs                      |  89 +++++++++++++-
- crates/gpui/src/scene.rs                         | 159 ++++++++++++++++++++++++
- crates/gpui/src/style.rs                         |  18 +++
+ crates/gpui/src/app.rs                           |  34 +++
+ crates/gpui/src/assets.rs                        |  23 ++
+ crates/gpui/src/d3d11_surface.rs                 |  64 ++++++
+ crates/gpui/src/debug_overlay.rs                 |   4 +
+ crates/gpui/src/dmabuf.rs                        | 135 ++++++++++++
+ crates/gpui/src/element.rs                       |   2 +-
+ crates/gpui/src/elements/div.rs                  |   8 +
+ crates/gpui/src/elements/img.rs                  |  82 +++++++-
+ crates/gpui/src/elements/surface.rs              |  48 ++++-
+ crates/gpui/src/elements/text.rs                 | 149 ++++++++++++-
+ crates/gpui/src/gpui.rs                          |   8 +
+ crates/gpui/src/key_dispatch.rs                  |  52 +++++
+ crates/gpui/src/platform.rs                      |  89 +++++++-
+ crates/gpui/src/scene.rs                         | 163 +++++++++++++++
+ crates/gpui/src/style.rs                         |  18 ++
  crates/gpui/src/styled.rs                        |  12 +-
- crates/gpui/src/taffy.rs                         | 155 +++++++++++++++++++++++
- crates/gpui/src/text_system.rs                   | 132 ++++++++++++++++----
- crates/gpui/src/text_system/glow_mask.rs         | 182 +++++++++++++++++++++++++++
- crates/gpui/src/text_system/line.rs              | 115 ++++++++++++++++-
- crates/gpui/src/window.rs                        | 530 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----
- crates/gpui/src/window/a11y.rs                   |  18 ++-
- crates/gpui_apple/Cargo.toml                     |   5 +
+ crates/gpui/src/taffy.rs                         | 155 ++++++++++++++
+ crates/gpui/src/text_system.rs                   | 126 +++++++++--
+ crates/gpui/src/text_system/glow_mask.rs         | 182 ++++++++++++++++
+ crates/gpui/src/text_system/line.rs              | 120 ++++++++++-
+ crates/gpui/src/window.rs                        | 602 ++++++++++++++++++++++++++++++++++++++++++++++++++---
+ crates/gpui/src/window/a11y.rs                   |  18 +-
+ crates/gpui_apple/Cargo.toml                     |   7 +
  crates/gpui_apple/build.rs                       |   4 +
  crates/gpui_apple/src/gpui_apple.rs              |   5 +
- crates/gpui_apple/src/metal_custom_shader.rs     | 522 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- crates/gpui_apple/src/metal_renderer.rs          | 550 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
- crates/gpui_apple/src/shaders.metal              | 179 ++++++++++++++++++++++++++-
+ crates/gpui_apple/src/metal_custom_shader.rs     | 522 ++++++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_apple/src/metal_renderer.rs          | 552 +++++++++++++++++++++++++++++++++++++++++++++++-
+ crates/gpui_apple/src/shaders.metal              | 179 +++++++++++++++-
+ crates/gpui_apple/src/text_system.rs             |  27 ++-
  crates/gpui_linux/Cargo.toml                     |   1 +
- crates/gpui_linux/src/linux/platform.rs          |  47 ++++++-
+ crates/gpui_linux/src/linux/platform.rs          |  47 ++++-
  crates/gpui_linux/src/linux/wayland.rs           |   2 +-
- crates/gpui_linux/src/linux/wayland/client.rs    | 231 +++++++++++++++++++++++++++++++++-
- crates/gpui_linux/src/linux/wayland/clipboard.rs |  78 ++++++++++--
- crates/gpui_linux/src/linux/wayland/window.rs    | 237 +++++++++++++++++++++++++++++++----
- crates/gpui_linux/src/linux/x11/client.rs        |  42 +++++--
- crates/gpui_linux/src/linux/x11/clipboard.rs     |  16 ++-
- crates/gpui_linux/src/linux/x11/window.rs        |  29 ++++-
- crates/gpui_macos/src/pasteboard.rs              |  39 +++++-
- crates/gpui_macos/src/text_system.rs             |  23 +++-
- crates/gpui_macos/src/window.rs                  | 162 ++++++++----------------
- crates/gpui_shared_string/Cargo.toml             |   1 +
- crates/gpui_util/Cargo.toml                      |   1 +
- crates/gpui_util/src/lib.rs                      |  22 +++-
- crates/gpui_web/src/window.rs                    |  13 +-
- crates/gpui_wgpu/Cargo.toml                      |   5 +
- crates/gpui_wgpu/src/cosmic_text_system.rs       |  69 ++++++++++-
- crates/gpui_wgpu/src/dmabuf_texture.rs           | 206 +++++++++++++++++++++++++++++++
+ crates/gpui_linux/src/linux/wayland/client.rs    | 231 +++++++++++++++++++-
+ crates/gpui_linux/src/linux/wayland/clipboard.rs |  78 ++++++-
+ crates/gpui_linux/src/linux/wayland/window.rs    | 233 ++++++++++++++++++---
+ crates/gpui_linux/src/linux/x11/client.rs        |  42 +++-
+ crates/gpui_linux/src/linux/x11/clipboard.rs     |  16 +-
+ crates/gpui_linux/src/linux/x11/window.rs        |  30 ++-
+ crates/gpui_macos/src/events.rs                  |  31 +++
+ crates/gpui_macos/src/pasteboard.rs              |  39 +++-
+ crates/gpui_macos/src/window.rs                  | 167 +++++----------
+ crates/gpui_util/src/lib.rs                      |  18 +-
+ crates/gpui_web/Cargo.toml                       |   5 +-
+ crates/gpui_web/src/window.rs                    |  12 +-
+ crates/gpui_wgpu/Cargo.toml                      |  10 +-
+ crates/gpui_wgpu/src/cosmic_text_system.rs       |  78 ++++++-
+ crates/gpui_wgpu/src/dmabuf_texture.rs           | 206 ++++++++++++++++++
  crates/gpui_wgpu/src/gpui_wgpu.rs                |   2 +
- crates/gpui_wgpu/src/shaders.wgsl                |  96 +++++++++++++--
- crates/gpui_wgpu/src/wgpu_context.rs             | 181 +++++++++++++++++++++++++++
- crates/gpui_wgpu/src/wgpu_renderer.rs            | 635 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ crates/gpui_wgpu/src/shaders.wgsl                |  96 ++++++++-
+ crates/gpui_wgpu/src/shaders_webgl.wgsl          |  82 +++-----
+ crates/gpui_wgpu/src/wgpu_context.rs             | 181 ++++++++++++++++
+ crates/gpui_wgpu/src/wgpu_renderer.rs            | 520 ++++++++++++++++++++++++++++++++++++++++++++-
  crates/gpui_windows/Cargo.toml                   |   1 +
  crates/gpui_windows/build.rs                     |   1 +
- crates/gpui_windows/src/clipboard.rs             |  37 +++++-
- crates/gpui_windows/src/direct_write.rs          |  41 +++++--
- crates/gpui_windows/src/directx_custom_shader.rs | 420 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- crates/gpui_windows/src/directx_renderer.rs      | 270 ++++++++++++++++++++++++++++++++++++++--
- crates/gpui_windows/src/events.rs                |  36 ++++++
+ crates/gpui_windows/src/clipboard.rs             |  37 +++-
+ crates/gpui_windows/src/direct_write.rs          | 110 +++++++---
+ crates/gpui_windows/src/directx_custom_shader.rs | 420 +++++++++++++++++++++++++++++++++++++
+ crates/gpui_windows/src/directx_renderer.rs      | 270 ++++++++++++++++++++++--
+ crates/gpui_windows/src/events.rs                | 120 ++++++++++-
  crates/gpui_windows/src/gpui_windows.rs          |   2 +
- crates/gpui_windows/src/keyboard.rs              |  71 +++++------
- crates/gpui_windows/src/native_drag.rs           | 522 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- crates/gpui_windows/src/shaders.hlsl             |  37 ++++++
- crates/gpui_windows/src/window.rs                |  51 +++++++-
- crates/sum_tree/Cargo.toml                       |   2 -
+ crates/gpui_windows/src/keyboard.rs              |  71 +++----
+ crates/gpui_windows/src/native_drag.rs           | 522 ++++++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_windows/src/platform.rs              |   5 +-
+ crates/gpui_windows/src/shaders.hlsl             |  44 ++++
+ crates/gpui_windows/src/util.rs                  |  14 ++
+ crates/gpui_windows/src/window.rs                |  58 +++++-
+ crates/sum_tree/Cargo.toml                       |   3 +-
  crates/sum_tree/src/cursor.rs                    |   2 +-
  crates/sum_tree/src/sum_tree.rs                  |   7 +-
- 68 files changed, 6693 insertions(+), 379 deletions(-)
+ 74 files changed, 7217 insertions(+), 475 deletions(-)
 ```
 
-_Last generated: 2026-09-01 (commit `ce85100f4a` at branch HEAD)._
+_Last generated: 2026-10-21 (after merge commit `77cfef62`)._
