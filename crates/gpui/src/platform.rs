@@ -454,6 +454,11 @@ pub trait Platform: 'static {
     fn open_with_system(&self, path: &Path);
 
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>);
+    /// Fork: registers the callback asked whether the application may quit
+    /// when the platform ends it on its own — on macOS the Dock's Quit,
+    /// logout and shutdown (`applicationShouldTerminate:`). `false` keeps it
+    /// running. Platforms that never ask ignore the callback.
+    fn on_should_quit(&self, _callback: Box<dyn FnMut() -> bool>) {}
     fn on_reopen(&self, callback: Box<dyn FnMut()>);
     /// Registers the callback invoked when the system is about to sleep.
     fn on_system_sleep(&self, callback: Box<dyn FnMut()>);

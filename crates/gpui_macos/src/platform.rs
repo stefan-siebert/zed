@@ -101,6 +101,10 @@ unsafe fn build_classes() {
                 should_handle_reopen as extern "C" fn(&mut Object, Sel, id, bool),
             );
             decl.add_method(
+                sel!(applicationShouldTerminate:),
+                should_terminate as extern "C" fn(&mut Object, Sel, id) -> NSUInteger,
+            );
+            decl.add_method(
                 sel!(applicationWillTerminate:),
                 will_terminate as extern "C" fn(&mut Object, Sel, id),
             );
@@ -195,6 +199,7 @@ pub(crate) struct MacPlatformState {
     on_system_wake: Option<Box<dyn FnMut()>>,
     system_power_observers_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
+    should_quit: Option<Box<dyn FnMut() -> bool>>,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
@@ -258,6 +263,7 @@ impl MacPlatform {
             find_pasteboard: Pasteboard::find(),
             reopen: None,
             quit: None,
+            should_quit: None,
             menu_command: None,
             validate_menu_command: None,
             will_open_menu: None,
@@ -1064,6 +1070,10 @@ impl Platform for MacPlatform {
         self.0.lock().quit = Some(callback);
     }
 
+    fn on_should_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+        self.0.lock().should_quit = Some(callback);
+    }
+
     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
         self.0.lock().reopen = Some(callback);
     }
@@ -1375,6 +1385,28 @@ extern "C" fn should_handle_reopen(this: &mut Object, _: Sel, _: id, has_open_wi
             callback();
             platform.0.lock().reopen.get_or_insert(callback);
         }
+    }
+}
+
+/// Fork: `NSTerminateCancel` when the app's `on_should_quit` callback says
+/// no, `NSTerminateNow` otherwise. AppKit asks on every `terminate:` — the
+/// Dock's Quit, logout, shutdown, and `App::quit` too, which the callback
+/// lets through.
+extern "C" fn should_terminate(this: &mut Object, _: Sel, _: id) -> NSUInteger {
+    const NS_TERMINATE_CANCEL: NSUInteger = 0;
+    const NS_TERMINATE_NOW: NSUInteger = 1;
+    let platform = unsafe { get_mac_platform(this) };
+    let mut lock = platform.0.lock();
+    let Some(mut callback) = lock.should_quit.take() else {
+        return NS_TERMINATE_NOW;
+    };
+    drop(lock);
+    let allowed = callback();
+    platform.0.lock().should_quit.get_or_insert(callback);
+    if allowed {
+        NS_TERMINATE_NOW
+    } else {
+        NS_TERMINATE_CANCEL
     }
 }
 

@@ -891,6 +891,11 @@ pub struct App {
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
     pub(crate) global_observers: SubscriberSet<TypeId, Handler>,
     pub(crate) quit_observers: SubscriberSet<(), QuitHandler>,
+    /// Fork: asked by [`App::on_should_quit`] handlers.
+    should_quit_handlers: SubscriberSet<(), Handler>,
+    /// Fork: set by [`App::quit`], so the platform's own question that
+    /// follows it is not put to the `on_should_quit` handlers again.
+    quit_requested: Cell<bool>,
     pub(crate) restart_observers: SubscriberSet<(), Handler>,
     pub(crate) window_closed_observers: SubscriberSet<(), WindowClosedHandler>,
 
@@ -1035,6 +1040,8 @@ impl App {
                 memory_warning_observers: SubscriberSet::new(),
                 global_observers: SubscriberSet::new(),
                 quit_observers: SubscriberSet::new(),
+                should_quit_handlers: SubscriberSet::new(),
+                quit_requested: Cell::new(false),
                 restart_observers: SubscriberSet::new(),
                 restart_path: None,
                 restart_arguments: Vec::new(),
@@ -1151,6 +1158,21 @@ impl App {
                             .clone()
                             .retain(&(), |callback| callback(cx));
                     });
+                }
+            }
+        }));
+
+        platform.on_should_quit(Box::new({
+            let cx = Rc::downgrade(&app);
+            move || {
+                let Some(cx) = cx.upgrade() else {
+                    return true;
+                };
+                match cx.try_borrow_mut() {
+                    Ok(mut cx) => cx.should_quit(),
+                    // Nobody can be asked while the AppCell is borrowed; quit
+                    // as the platform would without a handler.
+                    Err(_) => true,
                 }
             }
         }));
@@ -1300,7 +1322,24 @@ impl App {
 
     /// Gracefully quit the application via the platform's standard routine.
     pub fn quit(&self) {
+        self.quit_requested.set(true);
         self.platform.quit();
+    }
+
+    /// Fork: whether the platform may end the application now — every
+    /// [`App::on_should_quit`] handler is asked, and one `false` keeps it
+    /// running. A quit the app asked for itself ([`App::quit`]) is not
+    /// questioned.
+    fn should_quit(&mut self) -> bool {
+        if self.quit_requested.get() {
+            return true;
+        }
+        let mut allowed = true;
+        self.should_quit_handlers.clone().retain(&(), |handler| {
+            allowed &= handler(self);
+            true
+        });
+        allowed
     }
 
     /// Switches the platform between headless and windowed modes.
@@ -2849,6 +2888,17 @@ impl App {
         subscription
     }
 
+    /// Fork: register a handler asked whether the application may quit when
+    /// the platform ends it on its own — on macOS the Dock's Quit, logout and
+    /// shutdown. Return `false` to keep running (say, to ask the user first,
+    /// and call [`App::quit`] once they agree). Not asked for [`App::quit`]
+    /// itself, and never on platforms that do not ask.
+    pub fn on_should_quit(&self, handler: impl FnMut(&mut App) -> bool + 'static) -> Subscription {
+        let (subscription, activate) = self.should_quit_handlers.insert((), Box::new(handler));
+        activate();
+        subscription
+    }
+
     /// Register a callback to be invoked when the application is about to restart.
     ///
     /// These callbacks are called before any `on_app_quit` callbacks.
@@ -3728,6 +3778,35 @@ mod test {
         AppContext, Context, Empty, FallbackFontClass, IntoElement, MissingGlyph, Render,
         TestAppContext, Window,
     };
+
+    /// Fork: every `on_should_quit` handler is asked and one `false` keeps the
+    /// app running, until the app quits by itself — the platform's question
+    /// that follows `App::quit` must not be refused.
+    #[gpui::test]
+    fn should_quit_asks_the_handlers_until_the_app_quits(cx: &mut TestAppContext) {
+        let asked = Rc::new(Cell::new(0));
+        let allow = Rc::new(Cell::new(false));
+        let _subscription = cx.update(|cx| {
+            cx.on_should_quit({
+                let asked = asked.clone();
+                let allow = allow.clone();
+                move |_| {
+                    asked.set(asked.get() + 1);
+                    allow.get()
+                }
+            })
+        });
+        let _always = cx.update(|cx| cx.on_should_quit(|_| true));
+
+        assert!(!cx.update(|cx| cx.should_quit()));
+        allow.set(true);
+        assert!(cx.update(|cx| cx.should_quit()));
+
+        allow.set(false);
+        cx.update(|cx| cx.quit());
+        assert!(cx.update(|cx| cx.should_quit()));
+        assert_eq!(asked.get(), 2);
+    }
 
     #[gpui::test]
     fn app_borrow_diagnostics(cx: &mut TestAppContext) {
