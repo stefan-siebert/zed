@@ -262,6 +262,12 @@ the binding swallowed the wildcard.
 |---|---|
 | `6efe33cb` | **`App::on_should_quit(handler)`**, answered by `applicationShouldTerminate:`. macOS ends an app on its own on the Dock's Quit, at logout and at shutdown; upstream does not implement the delegate method, so AppKit's default `NSTerminateNow` applied and an app could not refuse. `Platform::on_should_quit` (default: ignore — Windows/Linux have no such question) registers the callback; `gpui_macos` returns `NSTerminateCancel` when it says no. One handler returning `false` keeps the app running. `App::quit` sets `quit_requested` first: on macOS it ends in the same `terminate:`, and the quit the app asked for itself must not be refused. A borrowed `AppCell` when AppKit asks lets the quit through, as before. Test: `app::test::should_quit_asks_the_handlers_until_the_app_quits`. Elane refuses while file operations run and asks as on Cmd+Q (`MainWindow::allow_platform_quit`). |
 
+## 8b. Window-control insets (iPadOS)
+
+| Commit | Change |
+|---|---|
+| (uncommitted) | **`WindowInsets::window_controls`** (`WindowControlsInsets { beside, below }`). A windowed iPadOS 26+ app shows close/minimize/full-screen over its top-leading corner, and `safeAreaInsets` does not cover them, so content drew underneath. `gpui_ios` now asks `edgeInsetsForLayoutRegion:` of `safeAreaLayoutRegionWithCornerAdaptation:` once per axis on every layout and reports what each adds to the safe area: `beside` (horizontal: content on the controls' line starts after them), `below` (vertical: content starts under them). The app picks per region; `effective()` leaves both out. Zero before iOS 26 (no `UIViewLayoutRegion` class — guarded by `respondsToSelector`), full screen, on an iPhone and on every other platform. Measured 2026-10-22, iPad Pro 11″ simulator, iPadOS 27.0: `beside.left` 66 pt (and `beside.right` 9.5), `below.top` 43 pt, on top of a 32 pt safe area; the very first frame still reports zero, the first layout pass corrects it. Needs objc2-ui-kit's `UIViewLayoutRegion` feature. |
+
 ## 9. Image handling
 
 | Commit | Change |

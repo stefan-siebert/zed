@@ -18,7 +18,8 @@ use gpui::{
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
     PromptLevel, RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange,
     TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowInsets, WindowParams, WindowVisibility, px, size,
+    WindowControlArea, WindowControlsInsets, WindowInsets, WindowParams, WindowVisibility, px,
+    size,
 };
 use gpui_apple::metal_renderer::{Context as MetalContext, MetalRenderer};
 use objc2::rc::Retained;
@@ -40,7 +41,8 @@ use objc2_ui_kit::{
     UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen,
     UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITraitCollection,
     UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
-    UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
+    UIViewAutoresizing, UIViewController, UIViewLayoutRegion, UIViewLayoutRegionAdaptivityAxis,
+    UIWindow, UIWindowScene,
 };
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
@@ -674,6 +676,31 @@ impl IosWindowState {
                 ..Default::default()
             },
             corner_radii: self.display_corner_radii(),
+            window_controls: self.window_controls_insets(),
+        }
+    }
+
+    /// How far the safe area grows, per axis, when it adapts to the window
+    /// controls in the top-leading corner (iPadOS 26+). Zero where the
+    /// window shows none, e.g. full screen or on an iPhone.
+    fn window_controls_insets(&self) -> WindowControlsInsets {
+        if !reports_layout_regions(&self.view) {
+            return WindowControlsInsets::default();
+        }
+        let safe_area = self.view.safeAreaInsets();
+        let beyond_safe_area = |axis| {
+            let region = UIViewLayoutRegion::safeAreaLayoutRegionWithCornerAdaptation(axis);
+            let insets = self.view.edgeInsetsForLayoutRegion(&region);
+            Edges {
+                top: px((insets.top - safe_area.top).max(0.) as f32),
+                right: px((insets.right - safe_area.right).max(0.) as f32),
+                bottom: px((insets.bottom - safe_area.bottom).max(0.) as f32),
+                left: px((insets.left - safe_area.left).max(0.) as f32),
+            }
+        };
+        WindowControlsInsets {
+            beside: beyond_safe_area(UIViewLayoutRegionAdaptivityAxis::Horizontal),
+            below: beyond_safe_area(UIViewLayoutRegionAdaptivityAxis::Vertical),
         }
     }
 
@@ -796,6 +823,12 @@ impl IosWindowState {
 /// Whether UIKit can resolve corner configurations, which arrived in iOS 26.
 fn reports_corner_radii(view: &UIView) -> bool {
     view.respondsToSelector(sel!(effectiveRadiusForCorner:))
+}
+
+/// Whether UIKit has layout regions, which arrived in iOS 26 together with
+/// window controls; before that `UIViewLayoutRegion` is not even a class.
+fn reports_layout_regions(view: &UIView) -> bool {
+    view.respondsToSelector(sel!(edgeInsetsForLayoutRegion:))
 }
 
 impl Drop for IosWindow {

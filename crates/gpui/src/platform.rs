@@ -1206,6 +1206,26 @@ pub struct WindowInsets {
     /// Content inset from an edge by `d` lines up with the display by using a
     /// radius of `radius - d`. (iOS 26+: a concentric `UICornerConfiguration`.)
     pub corner_radii: Corners<Pixels>,
+    /// What content must give up, beyond `safe_area`, to keep clear of the
+    /// window's own controls. Zero where the window has none.
+    /// (iPadOS 26+: the close, minimize and full-screen buttons a windowed
+    /// app shows over its top-leading corner.)
+    pub window_controls: WindowControlsInsets,
+}
+
+/// The two ways to keep clear of a window's controls, each on top of
+/// [`WindowInsets::safe_area`]. Pick per region: a header row usually starts
+/// beside them, a scrolling list below them.
+///
+/// (iOS: `edgeInsetsForLayoutRegion:` of
+/// `safeAreaLayoutRegionWithCornerAdaptation:`, horizontal and vertical,
+/// minus `safeAreaInsets`.)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WindowControlsInsets {
+    /// Content starts next to the controls, on the same line.
+    pub beside: Edges<Pixels>,
+    /// Content starts underneath the controls.
+    pub below: Edges<Pixels>,
 }
 
 impl WindowInsets {
