@@ -10,16 +10,17 @@
 //! whose view hosts a CAMetalLayer.
 
 use super::events::*;
+use super::keyboard::{self, HardwareKeyboard, PressPhase};
 use super::text_input::TextInputView;
 use super::{CallbackSlot, IosDisplay, platform::IosPlatformState};
 use gpui::{
-    AnyWindowHandle, BackGestureEvent, BackGesturePhase, Bounds, Capslock, Corners, DevicePixels,
-    DispatchEventResult, DisplayId, Edges, GpuSpecs, Modifiers, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
-    PromptLevel, RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange,
-    TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowControlsInsets, WindowInsets, WindowParams, WindowVisibility, px,
-    size,
+    AnyWindowHandle, BackGestureEvent, BackGesturePhase, BackgroundExecutor, Bounds, Capslock,
+    Corners, DevicePixels, DispatchEventResult, DisplayId, Edges, ForegroundExecutor, GpuSpecs,
+    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size,
+    TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowControlsInsets, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
 use gpui_apple::metal_renderer::{Context as MetalContext, MetalRenderer};
 use objc2::rc::Retained;
@@ -38,11 +39,11 @@ use objc2_ui_kit::{
 };
 use objc2_ui_kit::{
     UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen,
-    UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITraitCollection,
-    UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
-    UIViewAutoresizing, UIViewController, UIViewLayoutRegion, UIViewLayoutRegionAdaptivityAxis,
-    UIWindow, UIWindowScene,
+    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIPress, UIPressesEvent, UIRectCorner,
+    UIRectEdge, UIScreen, UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch,
+    UITraitCollection, UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle,
+    UIView, UIViewAutoresizing, UIViewController, UIViewLayoutRegion,
+    UIViewLayoutRegionAdaptivityAxis, UIWindow, UIWindowScene,
 };
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
@@ -166,6 +167,27 @@ define_class!(
             }
         }
 
+        #[unsafe(method(pressesBegan:withEvent:))]
+        fn presses_began(&self, presses: &NSSet<UIPress>, event: Option<&UIPressesEvent>) {
+            if self.handle_presses(presses, PressPhase::Began) {
+                unsafe { let _: () = msg_send![super(self), pressesBegan: presses, withEvent: event]; }
+            }
+        }
+
+        #[unsafe(method(pressesEnded:withEvent:))]
+        fn presses_ended(&self, presses: &NSSet<UIPress>, event: Option<&UIPressesEvent>) {
+            if self.handle_presses(presses, PressPhase::Ended) {
+                unsafe { let _: () = msg_send![super(self), pressesEnded: presses, withEvent: event]; }
+            }
+        }
+
+        #[unsafe(method(pressesCancelled:withEvent:))]
+        fn presses_cancelled(&self, presses: &NSSet<UIPress>, event: Option<&UIPressesEvent>) {
+            if self.handle_presses(presses, PressPhase::Cancelled) {
+                unsafe { let _: () = msg_send![super(self), pressesCancelled: presses, withEvent: event]; }
+            }
+        }
+
         #[unsafe(method(touchesBegan:withEvent:))]
         fn touches_began(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
             self.handle_touches(touches, event);
@@ -214,6 +236,17 @@ impl MetalView {
     fn new(frame: CGRect, main_thread: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(main_thread).set_ivars(WindowReference::default());
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// Hands hardware-keyboard presses to GPUI, unless the text input view is
+    /// first responder: then they reach this view only because that view
+    /// passed them on to UIKit, and GPUI has seen them already.
+    fn handle_presses(&self, presses: &NSSet<UIPress>, phase: PressPhase) -> bool {
+        let window = self.ivars().0.borrow().clone();
+        let text_input_active = window
+            .upgrade()
+            .is_some_and(|window| window.text_input_view.isFirstResponder());
+        text_input_active || keyboard::handle_presses(&window, presses, phase, false, self.mtm())
     }
 
     fn handle_touches(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
@@ -284,6 +317,7 @@ pub(crate) struct IosWindowState {
     /// Where the back gesture an element claimed started, while it runs.
     back_gesture_start: Cell<Option<Point<Pixels>>>,
     keyboard_height: Cell<f32>,
+    hardware_keyboard: HardwareKeyboard,
     /// Current mouse position (from touch)
     mouse_position: Cell<Point<Pixels>>,
     /// Current modifiers
@@ -445,6 +479,7 @@ impl IosWindow {
             keyboard_dismiss_touch: Cell::new(None),
             back_gesture_start: Cell::new(None),
             keyboard_height: Cell::new(0.),
+            hardware_keyboard: HardwareKeyboard::default(),
             mouse_position: Cell::new(Point::default()),
             modifiers: Cell::new(Modifiers::default()),
             renderer: Mutex::new(renderer),
@@ -522,6 +557,25 @@ impl IosWindowState {
                 .borrow_mut()
                 .extend([frame_observer, hide_observer]);
         }
+    }
+
+    pub(super) fn hardware_keyboard(&self) -> &HardwareKeyboard {
+        &self.hardware_keyboard
+    }
+
+    pub(super) fn set_modifiers(&self, modifiers: Modifiers) {
+        self.modifiers.set(modifiers);
+    }
+
+    pub(super) fn executors(&self) -> Option<(ForegroundExecutor, BackgroundExecutor)> {
+        Some(self.platform.upgrade()?.executors())
+    }
+
+    /// Dispatches `input` and returns whether GPUI handled it.
+    pub(super) fn dispatch_input(&self, input: PlatformInput) -> bool {
+        self.input_callback
+            .with(|callback| callback(input))
+            .is_some_and(|result| !result.propagate)
     }
 
     /// Delivers a UIKit touch through GPUI's platform-neutral touch API.
@@ -756,6 +810,9 @@ impl IosWindowState {
     /// Notify the window when its UIKit scene becomes active or inactive.
     pub fn notify_active_status_change(&self, is_active: bool) {
         log::info!("GPUI iOS: Window active status changed to: {}", is_active);
+        if !is_active {
+            self.hardware_keyboard.stop_repeat();
+        }
 
         self.active_status_callback
             .with(|callback| callback(is_active));
@@ -919,8 +976,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn capslock(&self) -> Capslock {
-        // Would need to check UIKeyModifierFlags
-        Capslock { on: false }
+        self.hardware_keyboard.capslock()
     }
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {

@@ -1,3 +1,4 @@
+use super::keyboard::{self, PressPhase};
 use super::window::{IosWindowState, WindowReference};
 use gpui::{
     Autocapitalize, PlatformInputHandler, TextInputAction, TextInputConfiguration,
@@ -9,7 +10,7 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
     NSArray, NSAttributedStringKey, NSComparisonResult, NSCopying, NSDictionary,
-    NSObjectNSDelayedPerforming, NSObjectProtocol, NSRange, NSString,
+    NSObjectNSDelayedPerforming, NSObjectProtocol, NSRange, NSSet, NSString,
 };
 use objc2_ui_kit::*;
 use std::{
@@ -153,6 +154,27 @@ define_class!(
                 self.ivars().keyboard_eligible.set(false);
             }
             resigned
+        }
+
+        #[unsafe(method(pressesBegan:withEvent:))]
+        fn presses_began(&self, presses: &NSSet<UIPress>, event: Option<&UIPressesEvent>) {
+            if self.handle_presses(presses, PressPhase::Began) {
+                unsafe { let _: () = msg_send![super(self), pressesBegan: presses, withEvent: event]; }
+            }
+        }
+
+        #[unsafe(method(pressesEnded:withEvent:))]
+        fn presses_ended(&self, presses: &NSSet<UIPress>, event: Option<&UIPressesEvent>) {
+            if self.handle_presses(presses, PressPhase::Ended) {
+                unsafe { let _: () = msg_send![super(self), pressesEnded: presses, withEvent: event]; }
+            }
+        }
+
+        #[unsafe(method(pressesCancelled:withEvent:))]
+        fn presses_cancelled(&self, presses: &NSSet<UIPress>, event: Option<&UIPressesEvent>) {
+            if self.handle_presses(presses, PressPhase::Cancelled) {
+                unsafe { let _: () = msg_send![super(self), pressesCancelled: presses, withEvent: event]; }
+            }
         }
 
         #[unsafe(method(reconcileTextInput))]
@@ -526,6 +548,14 @@ impl TextInputView {
         // Retaining the token in native objects prevents identity reuse, even
         // after returning to a field or destroying and recreating a responder.
         *self.ivars().session.borrow_mut() = Rc::new(());
+    }
+
+    /// Offers hardware-keyboard presses to GPUI first, as macOS does: a key
+    /// a binding takes never reaches the text system. Returns whether UIKit
+    /// must see them, so that it types what GPUI left alone.
+    fn handle_presses(&self, presses: &NSSet<UIPress>, phase: PressPhase) -> bool {
+        let window = self.ivars().window.0.borrow().clone();
+        keyboard::handle_presses(&window, presses, phase, true, self.mtm())
     }
 
     fn with_handler<R>(&self, callback: impl FnOnce(&mut PlatformInputHandler) -> R) -> Option<R> {

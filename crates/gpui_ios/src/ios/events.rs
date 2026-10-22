@@ -1,13 +1,14 @@
 //! Conversion from UIKit events to GPUI input events.
 
+use super::keyboard::modifiers;
 use gpui::{
-    BackGestureEvent, BackGesturePhase, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
-    ScrollSource, TouchId, TouchPhase, px,
+    BackGestureEvent, BackGesturePhase, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource,
+    TouchId, TouchPhase, px,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_ui_kit::{
-    UIGestureRecognizerState, UIKeyModifierFlags, UIPanGestureRecognizer, UIRectEdge,
-    UIScreenEdgePanGestureRecognizer, UITouch, UITouchPhase, UIView,
+    UIGestureRecognizerState, UIPanGestureRecognizer, UIRectEdge, UIScreenEdgePanGestureRecognizer,
+    UITouch, UITouchPhase, UIView,
 };
 
 /// A release faster than this, in points per second toward going back, commits
@@ -107,16 +108,6 @@ pub fn scroll_event(recognizer: &UIPanGestureRecognizer, view: &UIView) -> Optio
         touch_phase,
         source: ScrollSource::Pointer,
     })
-}
-
-fn modifiers(flags: UIKeyModifierFlags) -> Modifiers {
-    Modifiers {
-        control: flags.contains(UIKeyModifierFlags::Control),
-        alt: flags.contains(UIKeyModifierFlags::Alternate),
-        shift: flags.contains(UIKeyModifierFlags::Shift),
-        platform: flags.contains(UIKeyModifierFlags::Command),
-        function: false,
-    }
 }
 
 pub fn touch_force(touch: &UITouch) -> Option<f32> {

@@ -180,6 +180,15 @@ impl PlatformKeyboardLayout for IosKeyboardLayout {
     }
 }
 
+impl IosPlatformState {
+    pub(super) fn executors(&self) -> (ForegroundExecutor, BackgroundExecutor) {
+        (
+            self.foreground_executor.clone(),
+            self.background_executor.clone(),
+        )
+    }
+}
+
 impl Platform for IosPlatform {
     fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
         self.0.displays_changed_callback.set(callback);
