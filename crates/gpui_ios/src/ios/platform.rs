@@ -9,7 +9,7 @@
 //! - System keyboard handling differs significantly
 
 use super::{CallbackSlot, application::IosApplicationState};
-use super::{IosDisplay, IosWindow};
+use super::{IosDisplay, IosWindow, document_picker::DocumentPickers};
 use anyhow::anyhow;
 use block2::RcBlock;
 use futures::{
@@ -55,6 +55,7 @@ pub(crate) struct IosPlatformState {
     display_observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
     display_task: RefCell<Option<Task<()>>>,
     displays_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
+    document_pickers: Rc<DocumentPickers>,
 }
 
 impl Default for IosPlatform {
@@ -78,6 +79,7 @@ impl IosPlatform {
             display_observers: RefCell::new(Vec::new()),
             display_task: RefCell::new(None),
             displays_changed_callback: CallbackSlot::default(),
+            document_pickers: Rc::default(),
         });
         let (sender, mut receiver) = mpsc::unbounded();
         let block = RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {
@@ -308,15 +310,33 @@ impl Platform for IosPlatform {
 
     fn prompt_for_paths(
         &self,
-        _options: PathPromptOptions,
+        options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        if tx
-            .send(Err(anyhow!("File picker not yet implemented for iOS")))
-            .is_err()
-        {
-            log::debug!("GPUI iOS: File picker receiver was dropped");
-        }
+        // Presented from a task of its own, never from inside a GPUI update
+        // that would still hold the app borrowed while UIKit calls back.
+        let state = self.0.clone();
+        self.0
+            .foreground_executor
+            .spawn(async move {
+                let platform = IosPlatform(state);
+                let Some(presenter) = platform.presented_view_controller() else {
+                    if tx
+                        .send(Err(anyhow!(
+                            "No view controller to present the file picker on"
+                        )))
+                        .is_err()
+                    {
+                        log::debug!("GPUI iOS: File picker receiver was dropped");
+                    }
+                    return;
+                };
+                platform
+                    .0
+                    .document_pickers
+                    .present(&presenter, &options, tx);
+            })
+            .detach();
         rx
     }
 
