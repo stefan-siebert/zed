@@ -49,8 +49,8 @@ pub(super) struct HardwareKeyboard {
     held_modifiers: Cell<u8>,
     capslock: Cell<bool>,
     repeat: RefCell<Option<KeyRepeat>>,
-    /// Key codes whose `began` went to UIKit's text system, which therefore
-    /// expects their `ended` too.
+    /// Key codes whose `began` went on to UIKit, which therefore expects
+    /// their `ended` too.
     forwarded: RefCell<Vec<isize>>,
 }
 
@@ -73,19 +73,23 @@ impl HardwareKeyboard {
     }
 }
 
-/// Delivers `presses` to the window. With `forwards_unhandled` (the text
-/// input view) a key GPUI leaves unhandled goes on to UIKit, whose text
-/// system types it; returns whether the caller must pass `presses` to
-/// `super` for that.
+/// Delivers `presses` to the window. A key GPUI leaves unhandled goes on to
+/// UIKit: from the text input view to its text system, which types it, and
+/// from either view to the menu bar's key commands, which run only for a
+/// press that reaches UIKit — measured on iPadOS 27.0, `pressesBegan` comes
+/// first, as AppKit's `performKeyEquivalent:` lets GPUI go before the menu.
+/// Returns whether the caller must pass `presses` to `super` for that.
+/// `text_system` says the caller is the text input view: UIKit then repeats
+/// a key it was passed, and GPUI must not repeat it as well.
 pub(super) fn handle_presses(
     window: &Weak<IosWindowState>,
     presses: &NSSet<UIPress>,
     phase: PressPhase,
-    forwards_unhandled: bool,
+    text_system: bool,
     main_thread: MainThreadMarker,
 ) -> bool {
     let Some(state) = window.upgrade() else {
-        return forwards_unhandled;
+        return true;
     };
     let mut forward = false;
     for press in presses {
@@ -93,7 +97,7 @@ pub(super) fn handle_presses(
             forward = true;
             continue;
         };
-        forward |= handle_key(window, &state, &key, phase, forwards_unhandled);
+        forward |= handle_key(window, &state, &key, phase, text_system);
     }
     forward
 }
@@ -103,7 +107,7 @@ fn handle_key(
     state: &IosWindowState,
     key: &UIKey,
     phase: PressPhase,
-    forwards_unhandled: bool,
+    text_system: bool,
 ) -> bool {
     let keyboard = state.hardware_keyboard();
     let key_code = key.keyCode().0;
@@ -126,13 +130,13 @@ fn handle_key(
             modifiers,
             capslock: keyboard.capslock(),
         }));
-        // Modifiers type nothing, but the text system tracks them for
+        // Modifiers type nothing, but UIKit tracks them for key commands,
         // shift-selection and the like.
-        return forwards_unhandled;
+        return true;
     }
 
     let Some(keystroke) = keystroke(key, flags) else {
-        return forwards_unhandled;
+        return true;
     };
     state.set_modifiers(keystroke.modifiers);
 
@@ -143,9 +147,11 @@ fn handle_key(
                 is_held: false,
                 prefer_character_input: false,
             }));
-            let forward = forwards_unhandled && !handled;
+            let forward = !handled;
             if forward {
                 keyboard.forwarded.borrow_mut().push(key_code);
+            }
+            if forward && text_system {
                 keyboard.stop_repeat();
             } else {
                 start_repeat(window, state, key_code, keystroke);

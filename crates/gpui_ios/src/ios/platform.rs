@@ -3,13 +3,13 @@
 //! This implements the Platform trait for iOS using UIKit.
 //! Key differences from macOS:
 //! - Uses UIApplication instead of NSApplication
-//! - No menu bar (iOS apps don't have traditional menus)
+//! - The menu bar exists from iPadOS 26 on, built through `UIMainMenuSystem`
 //! - No windowed mode (iOS apps are always fullscreen on their display)
 //! - Touch-based input instead of mouse
 //! - System keyboard handling differs significantly
 
 use super::{CallbackSlot, application::IosApplicationState};
-use super::{IosDisplay, IosWindow, document_picker::DocumentPickers};
+use super::{IosDisplay, IosWindow, document_picker::DocumentPickers, menus::AppMenus};
 use anyhow::anyhow;
 use block2::RcBlock;
 use futures::{
@@ -18,8 +18,8 @@ use futures::{
 };
 use gpui::{
     Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem, CursorStyle,
-    DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu, MenuItem, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, Task, ThermalState, WindowAppearance, WindowParams,
 };
 use gpui_apple::{
@@ -56,6 +56,7 @@ pub(crate) struct IosPlatformState {
     display_task: RefCell<Option<Task<()>>>,
     displays_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
     document_pickers: DocumentPickers,
+    pub(super) menus: AppMenus,
 }
 
 impl Default for IosPlatform {
@@ -80,6 +81,7 @@ impl IosPlatform {
             display_task: RefCell::new(None),
             displays_changed_callback: CallbackSlot::default(),
             document_pickers: DocumentPickers::default(),
+            menus: AppMenus::default(),
         });
         let (sender, mut receiver) = mpsc::unbounded();
         let block = RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {
@@ -396,25 +398,29 @@ impl Platform for IosPlatform {
         self.0.application.memory_warning.set(callback);
     }
 
-    fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {
-        // iOS doesn't have a menu bar
-        // Could potentially integrate with UIMenuBuilder for context menus
+    fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap) {
+        self.0.menus.set(menus, keymap);
+    }
+
+    fn get_menus(&self) -> Option<Vec<OwnedMenu>> {
+        self.0.menus.get()
     }
 
     fn set_dock_menu(&self, _menu: Vec<MenuItem>, _keymap: &Keymap) {
         // iOS doesn't have a dock menu
     }
 
-    fn on_app_menu_action(&self, _callback: Box<dyn FnMut(&dyn Action)>) {
-        // Not applicable on iOS
+    fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
+        self.0.menus.command.set(callback);
     }
 
-    fn on_will_open_app_menu(&self, _callback: Box<dyn FnMut()>) {
-        // Not applicable on iOS
+    fn on_will_open_app_menu(&self, callback: Box<dyn FnMut()>) {
+        // UIKit reports no menu opening; kept so a later version can.
+        self.0.menus.will_open.set(callback);
     }
 
-    fn on_validate_app_menu_command(&self, _callback: Box<dyn FnMut(&dyn Action) -> bool>) {
-        // Not applicable on iOS
+    fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
+        self.0.menus.validate.set(callback);
     }
 
     fn app_path(&self) -> Result<PathBuf> {

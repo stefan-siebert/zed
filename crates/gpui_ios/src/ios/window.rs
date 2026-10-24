@@ -38,7 +38,7 @@ use objc2_ui_kit::{
     UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIStatusBarStyle,
 };
 use objc2_ui_kit::{
-    UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
+    UICommand, UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
     UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIPress, UIPressesEvent, UIRectCorner,
     UIRectEdge, UIScreen, UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch,
     UITraitCollection, UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle,
@@ -104,6 +104,26 @@ define_class!(
                 let _: () = msg_send![super(self), viewDidLayoutSubviews];
             }
             self.ivars().with_window(IosWindowState::handle_layout_change);
+        }
+
+        /// The selector of every menu-bar command (`menus.rs`).
+        #[unsafe(method(gpuiMenuCommand:))]
+        fn menu_command(&self, command: &UICommand) {
+            if let Some(platform) = super::application::current_platform() {
+                platform.menus.perform(command);
+            }
+        }
+
+        #[unsafe(method(validateCommand:))]
+        fn validate_command(&self, command: &UICommand) {
+            unsafe {
+                let _: () = msg_send![super(self), validateCommand: command];
+            }
+            if unsafe { command.action() } == sel!(gpuiMenuCommand:)
+                && let Some(platform) = super::application::current_platform()
+            {
+                platform.menus.validate(command);
+            }
         }
     }
 );

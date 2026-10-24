@@ -45,6 +45,33 @@ mod window {
     }
 }
 
+// The fixture window takes no key events; every press goes on to UIKit.
+#[cfg(target_os = "ios")]
+mod keyboard {
+    use super::window::IosWindowState;
+    use objc2::MainThreadMarker;
+    use objc2_foundation::NSSet;
+    use objc2_ui_kit::UIPress;
+    use std::rc::Weak;
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum PressPhase {
+        Began,
+        Ended,
+        Cancelled,
+    }
+
+    pub(crate) fn handle_presses(
+        _window: &Weak<IosWindowState>,
+        _presses: &NSSet<UIPress>,
+        _phase: PressPhase,
+        _text_system: bool,
+        _main_thread: MainThreadMarker,
+    ) -> bool {
+        true
+    }
+}
+
 fn main() {
     #[cfg(target_os = "ios")]
     {

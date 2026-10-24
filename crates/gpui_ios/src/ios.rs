@@ -5,6 +5,7 @@ mod display;
 mod document_picker;
 mod events;
 mod keyboard;
+mod menus;
 mod platform;
 pub mod security_scope;
 mod text_input;
