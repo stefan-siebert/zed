@@ -55,7 +55,7 @@ pub(crate) struct IosPlatformState {
     display_observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
     display_task: RefCell<Option<Task<()>>>,
     displays_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
-    document_pickers: Rc<DocumentPickers>,
+    document_pickers: DocumentPickers,
 }
 
 impl Default for IosPlatform {
@@ -79,7 +79,7 @@ impl IosPlatform {
             display_observers: RefCell::new(Vec::new()),
             display_task: RefCell::new(None),
             displays_changed_callback: CallbackSlot::default(),
-            document_pickers: Rc::default(),
+            document_pickers: DocumentPickers::default(),
         });
         let (sender, mut receiver) = mpsc::unbounded();
         let block = RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {
