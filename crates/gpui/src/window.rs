@@ -6207,6 +6207,33 @@ impl Window {
         }
     }
 
+    /// A right click at `position`, for a long press nothing claimed.
+    fn dispatch_secondary_click(&mut self, position: Point<Pixels>, cx: &mut App) {
+        let modifiers = self.modifiers;
+        self.mouse_position = position;
+        cx.propagate_event = true;
+        self.dispatch_mouse_event(
+            &crate::MouseDownEvent {
+                button: MouseButton::Right,
+                position,
+                modifiers,
+                click_count: 1,
+                first_mouse: false,
+            },
+            cx,
+        );
+        cx.propagate_event = true;
+        self.dispatch_mouse_event(
+            &MouseUpEvent {
+                button: MouseButton::Right,
+                position,
+                modifiers,
+                click_count: 1,
+            },
+            cx,
+        );
+    }
+
     fn dispatch_recognized_touch_gesture(&mut self, gesture: RecognizedTouchGesture, cx: &mut App) {
         match gesture {
             RecognizedTouchGesture::Scroll(scroll_wheel) => {
@@ -6247,7 +6274,11 @@ impl Window {
                 );
                 self.dispatch_mouse_event(&long_press, cx);
                 if started {
-                    let claimed = self.default_prevented;
+                    let mut claimed = self.default_prevented;
+                    if !claimed && cx.long_press_as_secondary_click {
+                        self.dispatch_secondary_click(long_press.start_position, cx);
+                        claimed = true;
+                    }
                     self.touch_gestures.resolve_long_press(claimed);
                     if !claimed {
                         self.long_press_capture = None;
@@ -9801,6 +9832,54 @@ mod tests {
                     .on_back_gesture(claim("outer"))
                     .child(div().w(px(50.)).h_full().on_back_gesture(claim("inner"))),
             )
+        }
+    }
+
+    #[gpui::test]
+    fn unclaimed_long_press_can_be_a_secondary_click(cx: &mut TestAppContext) {
+        for enabled in [true, false] {
+            cx.update(|cx| cx.set_long_press_as_secondary_click(enabled));
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let window = cx.add_window({
+                let events = events.clone();
+                move |_, _| SecondaryClickTarget { events }
+            });
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Started, 10.);
+            cx.executor().advance_clock(Duration::from_millis(501));
+            cx.executor().run_until_parked();
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Ended, 10.);
+            cx.executor().run_until_parked();
+            let events = events.borrow();
+            if enabled {
+                // Claimed, so lifting the finger is no tap.
+                assert_eq!(events.as_slice(), ["right down", "right up"]);
+            } else {
+                assert!(!events.contains(&"right down"), "{events:?}");
+            }
+        }
+    }
+
+    struct SecondaryClickTarget {
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Render for SecondaryClickTarget {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let down = self.events.clone();
+            let up = self.events.clone();
+            div()
+                .id("target")
+                .size_full()
+                .on_mouse_down(MouseButton::Right, move |_, _, _| {
+                    down.borrow_mut().push("right down")
+                })
+                .on_mouse_up(MouseButton::Right, move |_, _, _| {
+                    up.borrow_mut().push("right up")
+                })
+                .on_click({
+                    let events = self.events.clone();
+                    move |_, _, _| events.borrow_mut().push("tap")
+                })
         }
     }
 

@@ -945,6 +945,7 @@ pub struct App {
     pub(crate) mode: GpuiMode,
     pub(crate) cursor_hide_mode: CursorHideMode,
     pub(crate) reduce_motion: bool,
+    pub(crate) long_press_as_secondary_click: bool,
     /// Origin of the shared clock that phase-locks synced repeating animations.
     pub(crate) synced_animation_epoch: Instant,
     /// Whether the app was created by [`Application::new_inaccessible`]. No
@@ -1059,6 +1060,7 @@ impl App {
                 quitting: false,
                 cursor_hide_mode: CursorHideMode::default(),
                 reduce_motion: false,
+                long_press_as_secondary_click: false,
                 synced_animation_epoch,
                 accessibility_force_disabled: false,
 
@@ -1411,6 +1413,21 @@ impl App {
             self.reduce_motion = reduce_motion;
             self.refresh_windows();
         }
+    }
+
+    /// Returns whether a touch long press that no element claims is delivered
+    /// as a right click; see [`Self::set_long_press_as_secondary_click`].
+    pub fn long_press_as_secondary_click(&self) -> bool {
+        self.long_press_as_secondary_click
+    }
+
+    /// Sets whether a touch long press that no element claims is delivered as
+    /// a right click — `MouseDown` and `MouseUp` with
+    /// [`MouseButton::Right`](crate::MouseButton::Right) where the press
+    /// started — as touch platforms open a context menu. The press is claimed
+    /// then, so lifting the finger taps nothing. Off by default.
+    pub fn set_long_press_as_secondary_click(&mut self, enabled: bool) {
+        self.long_press_as_secondary_click = enabled;
     }
 
     /// Schedules all windows in the application to be redrawn. This can be called
