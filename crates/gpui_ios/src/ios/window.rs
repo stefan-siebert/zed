@@ -11,15 +11,16 @@
 
 use super::events::*;
 use super::keyboard::{self, HardwareKeyboard, PressPhase};
+use super::pointer::{self, Pointer};
 use super::shifted_keys;
 use super::text_input::TextInputView;
 use super::{CallbackSlot, IosDisplay, platform::IosPlatformState};
 use gpui::{
     AnyWindowHandle, BackGestureEvent, BackGesturePhase, BackgroundExecutor, Bounds, Capslock,
-    Corners, DevicePixels, DispatchEventResult, DisplayId, Edges, ForegroundExecutor, GpuSpecs,
-    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size,
-    TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
+    Corners, CursorStyle, DevicePixels, DispatchEventResult, DisplayId, Edges, ForegroundExecutor,
+    GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    Scene, Size, TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
     WindowControlsInsets, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
@@ -40,11 +41,13 @@ use objc2_ui_kit::{
 };
 use objc2_ui_kit::{
     UICommand, UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIKeyCommand, UIPanGestureRecognizer, UIPress, UIPressesEvent,
-    UIRectCorner, UIRectEdge, UIScreen, UIScreenEdgePanGestureRecognizer, UIScrollTypeMask,
-    UITouch, UITraitCollection, UITraitEnvironment, UIUserInterfaceLayoutDirection,
-    UIUserInterfaceStyle, UIView, UIViewAutoresizing, UIViewController, UIViewLayoutRegion,
-    UIViewLayoutRegionAdaptivityAxis, UIWindow, UIWindowScene,
+    UIGestureRecognizerDelegate, UIHoverGestureRecognizer, UIKeyCommand, UIPanGestureRecognizer,
+    UIPointerInteraction, UIPointerInteractionDelegate, UIPointerRegion, UIPointerRegionRequest,
+    UIPointerStyle, UIPress, UIPressesEvent, UIRectCorner, UIRectEdge, UIScreen,
+    UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITraitCollection,
+    UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
+    UIViewAutoresizing, UIViewController, UIViewLayoutRegion, UIViewLayoutRegionAdaptivityAxis,
+    UIWindow, UIWindowScene,
 };
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
@@ -254,6 +257,12 @@ define_class!(
             self.handle_touches(touches, event);
         }
 
+        #[unsafe(method(handlePointerHover:))]
+        fn handle_pointer_hover(&self, recognizer: &UIHoverGestureRecognizer) {
+            self.ivars()
+                .with_window(|window| pointer::handle_hover(window, recognizer, self));
+        }
+
         #[unsafe(method(handleScroll:))]
         fn handle_scroll(&self, recognizer: &UIPanGestureRecognizer) {
             self.ivars()
@@ -264,6 +273,31 @@ define_class!(
         fn handle_back_gesture(&self, recognizer: &UIScreenEdgePanGestureRecognizer) {
             self.ivars()
                 .with_window(|window| window.handle_back_gesture(recognizer));
+        }
+    }
+
+    unsafe impl UIPointerInteractionDelegate for MetalView {
+        #[unsafe(method_id(pointerInteraction:regionForRequest:defaultRegion:))]
+        fn pointer_region(
+            &self,
+            _interaction: &UIPointerInteraction,
+            _request: &UIPointerRegionRequest,
+            default_region: &UIPointerRegion,
+        ) -> Option<Retained<UIPointerRegion>> {
+            self.ivars()
+                .with_window(IosWindowState::cursor)
+                .and_then(|(cursor, hidden)| pointer::region(cursor, hidden, default_region))
+        }
+
+        #[unsafe(method_id(pointerInteraction:styleForRegion:))]
+        fn pointer_style(
+            &self,
+            _interaction: &UIPointerInteraction,
+            _region: &UIPointerRegion,
+        ) -> Option<Retained<UIPointerStyle>> {
+            self.ivars()
+                .with_window(IosWindowState::cursor)
+                .and_then(|(cursor, hidden)| pointer::style(cursor, hidden, self.mtm()))
         }
     }
 
@@ -364,6 +398,9 @@ pub(crate) struct IosWindowState {
     back_gesture_start: Cell<Option<Point<Pixels>>>,
     keyboard_height: Cell<f32>,
     hardware_keyboard: HardwareKeyboard,
+    pointer: Pointer,
+    /// Keeps the pointer's shape in step with `set_cursor_style`.
+    pointer_interaction: Retained<UIPointerInteraction>,
     /// Current mouse position (from touch)
     mouse_position: Cell<Point<Pixels>>,
     /// Current modifiers
@@ -469,6 +506,14 @@ impl IosWindow {
         back_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
         view.addGestureRecognizer(&back_recognizer);
 
+        let pointer_target: &AnyObject = &view;
+        let pointer_interaction = pointer::install(
+            &view,
+            pointer_target,
+            ProtocolObject::from_ref(&*view),
+            main_thread,
+        );
+
         let view_controller = ViewController::new(main_thread);
         view_controller.setView(Some(&view));
         window.setRootViewController(Some(&view_controller));
@@ -526,6 +571,8 @@ impl IosWindow {
             back_gesture_start: Cell::new(None),
             keyboard_height: Cell::new(0.),
             hardware_keyboard: HardwareKeyboard::default(),
+            pointer: Pointer::default(),
+            pointer_interaction,
             mouse_position: Cell::new(Point::default()),
             modifiers: Cell::new(Modifiers::default()),
             renderer: Mutex::new(renderer),
@@ -613,6 +660,43 @@ impl IosWindowState {
         self.modifiers.set(modifiers);
     }
 
+    pub(super) fn modifiers(&self) -> Modifiers {
+        self.modifiers.get()
+    }
+
+    pub(super) fn pointer(&self) -> &Pointer {
+        &self.pointer
+    }
+
+    pub(super) fn set_pointer_input(&self, position: Point<Pixels>, modifiers: Modifiers) {
+        self.mouse_position.set(position);
+        self.modifiers.set(modifiers);
+    }
+
+    pub(super) fn hover_status_changed(&self, hovered: bool) {
+        self.hover_status_callback
+            .with(|callback| callback(hovered));
+    }
+
+    /// The pointer's shape and whether it is hidden, as the platform last set them.
+    fn cursor(&self) -> (CursorStyle, bool) {
+        self.platform
+            .upgrade()
+            .map_or((CursorStyle::Arrow, false), |platform| platform.cursor())
+    }
+
+    /// Ends `hide_cursor_until_mouse_moves`, as the pointer moved.
+    pub(super) fn show_cursor(&self) {
+        if let Some(platform) = self.platform.upgrade() {
+            platform.show_cursor();
+        }
+    }
+
+    /// Asks the pointer interaction for the pointer's shape again.
+    pub(super) fn invalidate_pointer(&self) {
+        self.pointer_interaction.invalidate();
+    }
+
     pub(super) fn executors(&self) -> Option<(ForegroundExecutor, BackgroundExecutor)> {
         Some(self.platform.upgrade()?.executors())
     }
@@ -625,7 +709,10 @@ impl IosWindowState {
     }
 
     /// Delivers a UIKit touch through GPUI's platform-neutral touch API.
-    pub fn handle_touch(&self, touch: &UITouch, _event: Option<&UIEvent>) {
+    pub fn handle_touch(&self, touch: &UITouch, event: Option<&UIEvent>) {
+        if pointer::handle_touch(self, touch, event, &self.view) {
+            return;
+        }
         // GPUI timestamps delivery itself. Replaying UIKit's historical coalesced
         // samples here would make them appear simultaneous and distort fling velocity.
         let id = touch_id(touch);
@@ -1057,8 +1144,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn is_hovered(&self) -> bool {
-        // Hover isn't really applicable on iOS
-        false
+        self.pointer.is_hovered()
     }
 
     fn set_title(&mut self, _title: &str) {

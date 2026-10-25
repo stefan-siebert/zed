@@ -7,6 +7,7 @@ mod events;
 mod keyboard;
 mod menus;
 mod platform;
+mod pointer;
 pub mod security_scope;
 mod shifted_keys;
 mod text_input;

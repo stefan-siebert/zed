@@ -8,6 +8,7 @@
 //! - Touch-based input instead of mouse
 //! - System keyboard handling differs significantly
 
+use super::window::IosWindowState;
 use super::{CallbackSlot, application::IosApplicationState};
 use super::{IosDisplay, IosWindow, document_picker::DocumentPickers, menus::AppMenus};
 use anyhow::anyhow;
@@ -38,7 +39,7 @@ use objc2_ui_kit::{
 // Match UIScreen enumeration, including displays without a connected scene.
 use objc2_ui_kit::{UIScreenDidConnectNotification, UIScreenDidDisconnectNotification};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
@@ -57,6 +58,9 @@ pub(crate) struct IosPlatformState {
     displays_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
     document_pickers: DocumentPickers,
     pub(super) menus: AppMenus,
+    cursor: Cell<CursorStyle>,
+    /// Set by `hide_cursor_until_mouse_moves`, cleared when the pointer moves.
+    cursor_hidden: Cell<bool>,
 }
 
 impl Default for IosPlatform {
@@ -82,6 +86,8 @@ impl IosPlatform {
             displays_changed_callback: CallbackSlot::default(),
             document_pickers: DocumentPickers::default(),
             menus: AppMenus::default(),
+            cursor: Cell::new(CursorStyle::Arrow),
+            cursor_hidden: Cell::new(false),
         });
         let (sender, mut receiver) = mpsc::unbounded();
         let block = RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {
@@ -185,6 +191,22 @@ impl PlatformKeyboardLayout for IosKeyboardLayout {
 }
 
 impl IosPlatformState {
+    /// The pointer's shape and whether it is hidden until it moves.
+    pub(super) fn cursor(&self) -> (CursorStyle, bool) {
+        (self.cursor.get(), self.cursor_hidden.get())
+    }
+
+    pub(super) fn show_cursor(&self) {
+        if self.cursor_hidden.replace(false) {
+            self.invalidate_pointers();
+        }
+    }
+
+    fn invalidate_pointers(&self) {
+        self.application
+            .with_windows(IosWindowState::invalidate_pointer);
+    }
+
     pub(super) fn executors(&self) -> (ForegroundExecutor, BackgroundExecutor) {
         (
             self.foreground_executor.clone(),
@@ -434,14 +456,20 @@ impl Platform for IosPlatform {
         Ok(app_path.join(name))
     }
 
-    fn set_cursor_style(&self, _style: CursorStyle) {
-        // iOS doesn't have visible cursors (except for Apple Pencil hover on iPad)
+    fn set_cursor_style(&self, style: CursorStyle) {
+        if self.0.cursor.replace(style) != style {
+            self.0.invalidate_pointers();
+        }
     }
 
-    fn hide_cursor_until_mouse_moves(&self) {}
+    fn hide_cursor_until_mouse_moves(&self) {
+        if !self.0.cursor_hidden.replace(true) {
+            self.0.invalidate_pointers();
+        }
+    }
 
     fn is_cursor_visible(&self) -> bool {
-        false
+        !self.0.cursor_hidden.get()
     }
 
     fn should_auto_hide_scrollbars(&self) -> bool {
