@@ -18,7 +18,7 @@
 //! through that view controller whenever a GPUI view is first responder.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
@@ -58,6 +58,8 @@ pub(super) struct AppMenus {
     /// Each command's action and whether the menu declared it disabled;
     /// indexed by the command's property list.
     actions: RefCell<Vec<(Box<dyn Action>, bool)>>,
+    /// The index of the command each shortcut belongs to.
+    shortcuts: RefCell<HashMap<(String, isize), usize>>,
     configured: Cell<bool>,
     pub(super) command: CallbackSlot<Box<dyn FnMut(&dyn Action)>>,
     pub(super) validate: CallbackSlot<Box<dyn FnMut(&dyn Action) -> bool>>,
@@ -108,6 +110,7 @@ impl AppMenus {
             }
         }
         self.actions.replace(collected.actions);
+        self.shortcuts.replace(collected.shortcuts);
         self.built.replace(Some(built));
 
         let system = UIMainMenuSystem::sharedSystem(main_thread);
@@ -210,16 +213,31 @@ impl AppMenus {
         }
     }
 
+    /// Runs the action of the command whose shortcut `keystroke` is, if that
+    /// command is enabled; for a key whose press a hidden key command took
+    /// from the menu bar (`shifted_keys.rs`).
+    pub(super) fn perform_shortcut(&self, keystroke: &Keystroke) {
+        let Some(input) = key_input(keystroke) else {
+            return;
+        };
+        let shortcut = (input.to_string(), modifier_flags(keystroke).bits());
+        let Some(index) = self.shortcuts.borrow().get(&shortcut).copied() else {
+            return;
+        };
+        let Some((action, disabled)) = self.action_at(index) else {
+            return;
+        };
+        if self.enabled(&*action, disabled) {
+            self.command.with(|callback| callback(&*action));
+        }
+    }
+
     /// Enables or disables a command before the menu shows it.
     pub(super) fn validate(&self, command: &UICommand) {
         let Some((action, disabled)) = self.action(command) else {
             return;
         };
-        let enabled = !disabled
-            && self
-                .validate
-                .with(|callback| callback(&*action))
-                .unwrap_or(true);
+        let enabled = self.enabled(&*action, disabled);
         let attributes = command.attributes();
         command.setAttributes(if enabled {
             attributes - UIMenuElementAttributes::Disabled
@@ -228,12 +246,24 @@ impl AppMenus {
         });
     }
 
+    fn enabled(&self, action: &dyn Action, disabled: bool) -> bool {
+        !disabled
+            && self
+                .validate
+                .with(|callback| callback(action))
+                .unwrap_or(true)
+    }
+
     fn action(&self, command: &UICommand) -> Option<(Box<dyn Action>, bool)> {
         let index = command
             .propertyList()?
             .downcast::<NSNumber>()
             .ok()?
             .as_usize();
+        self.action_at(index)
+    }
+
+    fn action_at(&self, index: usize) -> Option<(Box<dyn Action>, bool)> {
         // Cloned, so the callback may call set_menus.
         self.actions
             .borrow()
@@ -250,8 +280,9 @@ struct Collected {
     /// Shortcuts already given to a command: when two commands in one menu
     /// share one, which GPUI allows (one action twice), UIKit throws
     /// `NSInvalidArgumentException` ("Inserted elements contain duplicates")
-    /// at the next key press (measured). Kept across menus too.
-    shortcuts: HashSet<(String, isize)>,
+    /// at the next key press (measured). Kept across menus too, with the
+    /// index of the command that has it.
+    shortcuts: HashMap<(String, isize), usize>,
 }
 
 /// `items` as menu elements: runs between separators become inline menus,
@@ -396,12 +427,20 @@ fn command(
     main_thread: MainThreadMarker,
 ) -> Retained<UICommand> {
     let title = NSString::from_str(name);
-    let index = NSNumber::new_usize(collected.actions.len());
+    let position = collected.actions.len();
+    let index = NSNumber::new_usize(position);
     let selector = sel!(gpuiMenuCommand:);
     let shortcut = shortcut(action, keymap).filter(|(input, modifiers)| {
-        collected
+        match collected
             .shortcuts
-            .insert((input.to_string(), modifiers.bits()))
+            .entry((input.to_string(), modifiers.bits()))
+        {
+            Entry::Vacant(entry) => {
+                entry.insert(position);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
     });
     if let Some((input, modifiers)) = shortcut {
         let command = unsafe {

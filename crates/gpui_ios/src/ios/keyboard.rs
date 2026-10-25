@@ -52,6 +52,12 @@ pub(super) struct HardwareKeyboard {
     /// Key codes whose `began` went on to UIKit, which therefore expects
     /// their `ended` too.
     forwarded: RefCell<Vec<isize>>,
+    /// A press whose character only UIKit's key-command matching knows
+    /// (`shifted_keys.rs`), with the keystroke UIKit's characters make.
+    waiting: RefCell<Option<(isize, Keystroke)>>,
+    /// A key whose keystroke a key command named, so its release names the
+    /// same keystroke.
+    named: RefCell<Option<(isize, Keystroke)>>,
 }
 
 struct KeyRepeat {
@@ -70,6 +76,11 @@ impl HardwareKeyboard {
     /// will not see its release.
     pub(super) fn stop_repeat(&self) {
         self.repeat.borrow_mut().take();
+    }
+
+    /// Whether a press waits for a hidden key command (`shifted_keys.rs`).
+    pub(super) fn waits_for_key_command(&self) -> bool {
+        self.waiting.borrow().is_some()
     }
 }
 
@@ -135,12 +146,16 @@ fn handle_key(
         return true;
     }
 
-    let Some(keystroke) = keystroke(key, flags) else {
+    let Some((keystroke, unreliable)) = keystroke(key, flags) else {
         return true;
     };
     state.set_modifiers(keystroke.modifiers);
 
     match phase {
+        PressPhase::Began if unreliable => {
+            wait_for_key_command(window, state, key_code, keystroke);
+            true
+        }
         PressPhase::Began => {
             let handled = state.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
                 keystroke: keystroke.clone(),
@@ -159,6 +174,19 @@ fn handle_key(
             forward
         }
         PressPhase::Ended | PressPhase::Cancelled => {
+            let waiting = keyboard
+                .waiting
+                .borrow()
+                .as_ref()
+                .is_some_and(|(code, _)| *code == key_code);
+            if waiting {
+                key_command_ran(window, None);
+            }
+            let named = keyboard
+                .named
+                .borrow_mut()
+                .take_if(|(code, _)| *code == key_code);
+            let keystroke = named.map_or(keystroke, |(_, named)| named);
             let repeating = keyboard
                 .repeat
                 .borrow()
@@ -178,6 +206,66 @@ fn handle_key(
             }
         }
     }
+}
+
+/// Sends a press to UIKit first, whose hidden key commands know the
+/// character it makes (`shifted_keys.rs`). A command that matches runs
+/// while UIKit handles the press and calls [`key_command_ran`]; whatever
+/// still waits afterwards goes to GPUI as `keystroke`.
+fn wait_for_key_command(
+    window: &Weak<IosWindowState>,
+    state: &IosWindowState,
+    key_code: isize,
+    keystroke: Keystroke,
+) {
+    let keyboard = state.hardware_keyboard();
+    keyboard.stop_repeat();
+    keyboard.forwarded.borrow_mut().push(key_code);
+    if let Some((previous, _)) = keyboard.waiting.replace(Some((key_code, keystroke))) {
+        log::debug!("GPUI iOS: key {previous:#x} still waited for a key command");
+    }
+    match state.executors() {
+        Some((foreground, _)) => {
+            let window = window.clone();
+            foreground
+                .spawn(async move { key_command_ran(&window, None) })
+                .detach();
+        }
+        None => key_command_ran(window, None),
+    }
+}
+
+/// Ends the wait of a press for its key command: `input` is the character
+/// of the command that matched, `None` when none did.
+pub(super) fn key_command_ran(window: &Weak<IosWindowState>, input: Option<String>) {
+    let Some(state) = window.upgrade() else {
+        return;
+    };
+    let keyboard = state.hardware_keyboard();
+    let Some((key_code, mut keystroke)) = keyboard.waiting.take() else {
+        return;
+    };
+    let named = input.is_some();
+    if let Some(input) = input {
+        // The character carries the shift, as for every other key.
+        keystroke.key = input;
+        keystroke.modifiers.shift = false;
+        keyboard.named.replace(Some((key_code, keystroke.clone())));
+    }
+    let handled = state.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    }));
+    // The key command took the press from the menu bar, so a menu command
+    // with this shortcut gets it next, as a key GPUI leaves does elsewhere.
+    if !handled
+        && named
+        && let Some(platform) = super::application::current_platform()
+    {
+        platform.menus.perform_shortcut(&keystroke);
+    }
+    start_repeat(window, &state, key_code, keystroke);
 }
 
 /// Repeats `keystroke` as held key-downs until its key comes up or another
@@ -245,12 +333,15 @@ pub(super) fn modifiers(flags: UIKeyModifierFlags) -> Modifiers {
     }
 }
 
-/// The keystroke a key makes, or `None` for a key GPUI has no name for.
-fn keystroke(key: &UIKey, flags: UIKeyModifierFlags) -> Option<Keystroke> {
+/// The keystroke a key makes, or `None` for a key GPUI has no name for, and
+/// whether its key is unreliable: shift with Command on a key that makes no
+/// letter, whose character UIKit reports wrongly (`shifted_keys.rs`).
+fn keystroke(key: &UIKey, flags: UIKeyModifierFlags) -> Option<(Keystroke, bool)> {
     let mut modifiers = modifiers(flags);
     let characters = key.characters().to_string();
     let types_text = !modifiers.control && !modifiers.platform;
     let text = |fixed: &str| types_text.then(|| fixed.to_string());
+    let mut unreliable = false;
 
     let (key_name, key_char) = match key.keyCode().0 {
         0x28 | 0x58 => ("enter".to_string(), text("\n")),
@@ -302,6 +393,12 @@ fn keystroke(key: &UIKey, flags: UIKeyModifierFlags) -> Option<Keystroke> {
                 || modifiers.alt
             {
                 ignoring
+            } else if modifiers.platform {
+                // Until a key command names the character, the keystroke
+                // keeps the shift rather than take UIKit's character, which
+                // may be the unshifted one ("cmd-7" for ⌘⇧7).
+                unreliable = true;
+                ignoring
             } else {
                 match typed(&characters, true) {
                     Some(shifted) => {
@@ -315,11 +412,14 @@ fn keystroke(key: &UIKey, flags: UIKeyModifierFlags) -> Option<Keystroke> {
         }
     };
 
-    Some(Keystroke {
-        modifiers,
-        key: key_name,
-        key_char,
-    })
+    Some((
+        Keystroke {
+            modifiers,
+            key: key_name,
+            key_char,
+        },
+        unreliable,
+    ))
 }
 
 /// `characters` as typed text, when there is any.

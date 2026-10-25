@@ -11,6 +11,7 @@
 
 use super::events::*;
 use super::keyboard::{self, HardwareKeyboard, PressPhase};
+use super::shifted_keys;
 use super::text_input::TextInputView;
 use super::{CallbackSlot, IosDisplay, platform::IosPlatformState};
 use gpui::{
@@ -24,7 +25,7 @@ use gpui::{
 };
 use gpui_apple::metal_renderer::{Context as MetalContext, MetalRenderer};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
+use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
@@ -39,10 +40,10 @@ use objc2_ui_kit::{
 };
 use objc2_ui_kit::{
     UICommand, UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIPress, UIPressesEvent, UIRectCorner,
-    UIRectEdge, UIScreen, UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch,
-    UITraitCollection, UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle,
-    UIView, UIViewAutoresizing, UIViewController, UIViewLayoutRegion,
+    UIGestureRecognizerDelegate, UIKeyCommand, UIPanGestureRecognizer, UIPress, UIPressesEvent,
+    UIRectCorner, UIRectEdge, UIScreen, UIScreenEdgePanGestureRecognizer, UIScrollTypeMask,
+    UITouch, UITraitCollection, UITraitEnvironment, UIUserInterfaceLayoutDirection,
+    UIUserInterfaceStyle, UIView, UIViewAutoresizing, UIViewController, UIViewLayoutRegion,
     UIViewLayoutRegionAdaptivityAxis, UIWindow, UIWindowScene,
 };
 use parking_lot::Mutex;
@@ -111,6 +112,31 @@ define_class!(
         fn menu_command(&self, command: &UICommand) {
             if let Some(platform) = super::application::current_platform() {
                 platform.menus.perform(command);
+            }
+        }
+
+        /// The hidden key commands of `shifted_keys.rs`.
+        #[unsafe(method_id(keyCommands))]
+        fn key_commands(&self) -> Option<Retained<NSArray<UIKeyCommand>>> {
+            Some(shifted_keys::key_commands(self.mtm()))
+        }
+
+        #[unsafe(method(gpuiShiftedKey:))]
+        fn shifted_key(&self, command: &UIKeyCommand) {
+            let window = self.ivars().0.borrow().clone();
+            keyboard::key_command_ran(&window, command.input().map(|input| input.to_string()));
+        }
+
+        /// Hidden key commands can be performed only while a press waits for
+        /// one; otherwise UIKit passes the key on to the menu bar and the system.
+        #[unsafe(method(canPerformAction:withSender:))]
+        fn can_perform_action(&self, action: Sel, sender: Option<&AnyObject>) -> bool {
+            if action == shifted_keys::action() {
+                self.ivars()
+                    .with_window(|window| window.hardware_keyboard().waits_for_key_command())
+                    .unwrap_or(false)
+            } else {
+                unsafe { msg_send![super(self), canPerformAction: action, withSender: sender] }
             }
         }
 

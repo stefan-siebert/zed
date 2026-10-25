@@ -8,6 +8,7 @@ mod keyboard;
 mod menus;
 mod platform;
 pub mod security_scope;
+mod shifted_keys;
 mod text_input;
 mod window;
 
