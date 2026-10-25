@@ -9,6 +9,7 @@
 //! The window is backed by a UIWindow containing a UIViewController
 //! whose view hosts a CAMetalLayer.
 
+use super::drop;
 use super::events::*;
 use super::keyboard::{self, HardwareKeyboard, PressPhase};
 use super::pointer::{self, Pointer};
@@ -40,7 +41,8 @@ use objc2_ui_kit::{
     UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIStatusBarStyle,
 };
 use objc2_ui_kit::{
-    UICommand, UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
+    UICommand, UICornerConfiguration, UICornerRadius, UIDropInteraction, UIDropInteractionDelegate,
+    UIDropOperation, UIDropProposal, UIDropSession, UIEvent, UIGestureRecognizer,
     UIGestureRecognizerDelegate, UIHoverGestureRecognizer, UIKeyCommand, UIPanGestureRecognizer,
     UIPointerInteraction, UIPointerInteractionDelegate, UIPointerRegion, UIPointerRegionRequest,
     UIPointerStyle, UIPress, UIPressesEvent, UIRectCorner, UIRectEdge, UIScreen,
@@ -276,6 +278,62 @@ define_class!(
         }
     }
 
+    unsafe impl UIDropInteractionDelegate for MetalView {
+        #[unsafe(method(dropInteraction:canHandleSession:))]
+        fn drop_can_handle(
+            &self,
+            _interaction: &UIDropInteraction,
+            session: &ProtocolObject<dyn UIDropSession>,
+        ) -> bool {
+            drop::can_handle(session)
+        }
+
+        #[unsafe(method(dropInteraction:sessionDidEnter:))]
+        fn drop_entered(
+            &self,
+            _interaction: &UIDropInteraction,
+            session: &ProtocolObject<dyn UIDropSession>,
+        ) {
+            self.ivars()
+                .with_window(|window| drop::entered(window, session, self));
+        }
+
+        #[unsafe(method_id(dropInteraction:sessionDidUpdate:))]
+        fn drop_updated(
+            &self,
+            _interaction: &UIDropInteraction,
+            session: &ProtocolObject<dyn UIDropSession>,
+        ) -> Retained<UIDropProposal> {
+            self.ivars()
+                .with_window(|window| drop::updated(window, session, self))
+                .unwrap_or_else(|| {
+                    UIDropProposal::initWithDropOperation(
+                        UIDropProposal::alloc(self.mtm()),
+                        UIDropOperation::Cancel,
+                    )
+                })
+        }
+
+        #[unsafe(method(dropInteraction:sessionDidExit:))]
+        fn drop_exited(
+            &self,
+            _interaction: &UIDropInteraction,
+            _session: &ProtocolObject<dyn UIDropSession>,
+        ) {
+            self.ivars().with_window(drop::exited);
+        }
+
+        #[unsafe(method(dropInteraction:performDrop:))]
+        fn drop_performed(
+            &self,
+            _interaction: &UIDropInteraction,
+            session: &ProtocolObject<dyn UIDropSession>,
+        ) {
+            let window = self.ivars().0.borrow().clone();
+            drop::perform(&window, session, self);
+        }
+    }
+
     unsafe impl UIPointerInteractionDelegate for MetalView {
         #[unsafe(method_id(pointerInteraction:regionForRequest:defaultRegion:))]
         fn pointer_region(
@@ -505,6 +563,8 @@ impl IosWindow {
         );
         back_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
         view.addGestureRecognizer(&back_recognizer);
+
+        drop::install(&view, ProtocolObject::from_ref(&*view), main_thread);
 
         let pointer_target: &AnyObject = &view;
         let pointer_interaction = pointer::install(

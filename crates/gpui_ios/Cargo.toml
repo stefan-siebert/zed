@@ -42,11 +42,12 @@ futures.workspace = true
 gpui_apple = { workspace = true, features = ["font-kit"] }
 log.workspace = true
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSThread", "NSOperation", "NSUserActivity", "block2"] }
-objc2-ui-kit = { workspace = true, features = ["UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UIImage", "UIKeyCommand", "UIMenuLeaf", "UIHoverGestureRecognizer", "UIInteraction", "UIPointerInteraction", "UIPointerRegion", "UIPointerStyle", "UIHoverStyle"] }
+objc2-foundation = { workspace = true, features = ["NSThread", "NSOperation", "NSUserActivity", "block2", "NSItemProvider", "NSPathUtilities", "NSError", "NSProgress"] }
+objc2-ui-kit = { workspace = true, features = ["UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UIImage", "UIKeyCommand", "UIMenuLeaf", "UIHoverGestureRecognizer", "UIInteraction", "UIPointerInteraction", "UIPointerRegion", "UIPointerStyle", "UIHoverStyle", "UIDropInteraction", "UIDragSession", "UIDragItem"] }
 objc2-quartz-core = { workspace = true, features = ["CADisplayLink"] }
 objc2-uniform-type-identifiers.workspace = true
 objc2-core-foundation = { workspace = true, default-features = true }
 parking_lot.workspace = true
 raw-window-handle.workspace = true
+smallvec.workspace = true
 uuid = { workspace = true, features = ["v5"] }
