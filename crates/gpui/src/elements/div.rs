@@ -15,6 +15,7 @@
 //! and Tailwind-like styling that you can use to build your own custom elements. Div is
 //! constructed by combining these two systems into an all-in-one element.
 
+use crate::window::PlatformDragSource;
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, BackGestureEvent, Bounds, ClickEvent,
     DispatchPhase, Display, Element, ElementId, Entity, EntityId, ExternalDragPayload,
@@ -658,7 +659,7 @@ impl Interactivity {
         );
         self.drag_listener = Some(DragListener {
             value: Arc::new(value),
-            render: Box::new(move |value, offset, window, cx| {
+            render: Rc::new(move |value, offset, window, cx| {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
             }),
             external_payload: None,
@@ -688,7 +689,7 @@ impl Interactivity {
             drag_listener.external_payload.is_none(),
             "calling external_drag_payload more than once on the same element is not supported"
         );
-        drag_listener.external_payload = Some(Box::new(move |value, window, cx| {
+        drag_listener.external_payload = Some(Rc::new(move |value, window, cx| {
             resolver(value.downcast_ref::<T>()?, window, cx)
         }));
     }
@@ -1818,12 +1819,12 @@ impl HoverListenerMode {
 
 pub(crate) struct DragListener {
     value: Arc<dyn Any>,
-    render: Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>,
+    render: Rc<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>,
     external_payload: Option<ExternalDragPayloadResolver>,
 }
 
 type ExternalDragPayloadResolver =
-    Box<dyn Fn(&dyn Any, &mut Window, &mut App) -> Option<ExternalDragPayload> + 'static>;
+    Rc<dyn Fn(&dyn Any, &mut Window, &mut App) -> Option<ExternalDragPayload> + 'static>;
 
 type DropListener = Box<dyn Fn(&dyn Any, &mut Window, &mut App) + 'static>;
 
@@ -3018,6 +3019,31 @@ impl Interactivity {
                     .clicked_state
                     .get_or_insert_with(Default::default)
                     .clone();
+
+                if let Some(listener) = &drag_listener
+                    && let Some(external_payload) = listener.external_payload.clone()
+                {
+                    let value = listener.value.clone();
+                    let render = listener.render.clone();
+                    let origin = hitbox.origin;
+                    window.register_platform_drag_source(PlatformDragSource {
+                        hitbox: hitbox.id,
+                        start: Rc::new(move |position, window, cx| {
+                            let payload = external_payload(value.as_ref(), window, cx)?;
+                            let cursor_offset = position - origin;
+                            let view = render(value.as_ref(), cursor_offset, window, cx);
+                            let drag = AnyDrag {
+                                view,
+                                value: value.clone(),
+                                cursor_offset,
+                                cursor_style: drag_cursor_style,
+                                is_external: false,
+                                external_payload_source: None,
+                            };
+                            Some((drag, payload))
+                        }),
+                    });
+                }
 
                 window.on_mouse_event({
                     let pending_mouse_down = pending_mouse_down.clone();

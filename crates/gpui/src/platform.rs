@@ -1406,6 +1406,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn start_external_drag(&self, _payload: &ExternalDragPayload) -> bool {
         false
     }
+    /// For a platform that starts drags by its own gesture rather than on
+    /// request (iOS): `callback` answers what to drag from a position in the
+    /// window, or `None` to let the gesture fail.
+    fn on_platform_drag_request(
+        &self,
+        _callback: Box<dyn FnMut(Point<Pixels>) -> Option<ExternalDragPayload>>,
+    ) {
+    }
     fn start_window_resize(&self, _edge: ResizeEdge) {}
     fn set_exclusive_zone(&self, _zone: Pixels) {}
     #[cfg(all(target_os = "linux", feature = "wayland"))]

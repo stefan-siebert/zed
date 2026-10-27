@@ -8,6 +8,11 @@
 //! the drag enters again with their paths and is submitted where it was
 //! dropped.
 //!
+//! A drag lifted from this window (`drag.rs`) enters it as GPUI's own drag
+//! again (`restore_platform_drag`), so a drop here is GPUI's drop of what was
+//! dragged, with nothing to load. A drag from another window of the app is
+//! loaded like one from another app.
+//!
 //! An item is loaded in place where its provider allows it — the original
 //! file, whose security scope `security_scope` starts — and otherwise as
 //! the provider's copy, which UIKit deletes when its handler returns and is
@@ -58,13 +63,16 @@ pub(super) fn install(
     view.addInteraction(ProtocolObject::<dyn UIInteraction>::from_ref(&*interaction));
 }
 
-/// Whether to take part in `session`: drags from other apps that carry
-/// anything at all. The app's own drags are GPUI's, and never reach UIKit.
+/// Whether to take part in `session`: drags that carry anything at all.
 pub(super) fn can_handle(session: &ProtocolObject<dyn UIDropSession>) -> bool {
-    session.localDragSession().is_none()
-        && session.hasItemsConformingToTypeIdentifiers(&NSArray::from_retained_slice(&[
-            NSString::from_str("public.item"),
-        ]))
+    session.hasItemsConformingToTypeIdentifiers(&NSArray::from_retained_slice(&[
+        NSString::from_str("public.item"),
+    ]))
+}
+
+/// Whether `session` is the drag lifted from `window`, which GPUI drops itself.
+fn is_own(window: &IosWindowState, session: &ProtocolObject<dyn UIDropSession>) -> bool {
+    window.is_drag_source() && session.localDragSession().is_some()
 }
 
 pub(super) fn entered(
@@ -79,7 +87,10 @@ pub(super) fn entered(
 }
 
 /// Moves the drag; the proposal copies, as `gpui_macos` does for a drag
-/// from another app.
+/// from another app. The window's own drag proposes a copy too: what its drop
+/// does is GPUI's to decide, and a move proposal is ignored for a drag that
+/// allows no move (`sessionAllowsMoveOperation`) — `performDrop` never
+/// came (measured).
 pub(super) fn updated(
     window: &IosWindowState,
     session: &ProtocolObject<dyn UIDropSession>,
@@ -103,6 +114,12 @@ pub(super) fn perform(
     view: &UIView,
 ) {
     let position = position(session, view);
+    if let Some(window) = window.upgrade()
+        && is_own(&window, session)
+    {
+        window.dispatch_input(PlatformInput::FileDrop(FileDropEvent::Submit { position }));
+        return;
+    }
     let receivers: Vec<_> = session
         .items()
         .iter()

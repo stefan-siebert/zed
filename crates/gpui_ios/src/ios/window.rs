@@ -9,6 +9,7 @@
 //! The window is backed by a UIWindow containing a UIViewController
 //! whose view hosts a CAMetalLayer.
 
+use super::drag;
 use super::drop;
 use super::events::*;
 use super::keyboard::{self, HardwareKeyboard, PressPhase};
@@ -18,8 +19,8 @@ use super::text_input::TextInputView;
 use super::{CallbackSlot, IosDisplay, platform::IosPlatformState};
 use gpui::{
     AnyWindowHandle, BackGestureEvent, BackGesturePhase, BackgroundExecutor, Bounds, Capslock,
-    Corners, CursorStyle, DevicePixels, DispatchEventResult, DisplayId, Edges, ForegroundExecutor,
-    GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    Corners, CursorStyle, DevicePixels, DispatchEventResult, DisplayId, Edges, ExternalDragPayload,
+    ForegroundExecutor, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
     Scene, Size, TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
@@ -41,15 +42,16 @@ use objc2_ui_kit::{
     UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIStatusBarStyle,
 };
 use objc2_ui_kit::{
-    UICommand, UICornerConfiguration, UICornerRadius, UIDropInteraction, UIDropInteractionDelegate,
-    UIDropOperation, UIDropProposal, UIDropSession, UIEvent, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIHoverGestureRecognizer, UIKeyCommand, UIPanGestureRecognizer,
-    UIPointerInteraction, UIPointerInteractionDelegate, UIPointerRegion, UIPointerRegionRequest,
-    UIPointerStyle, UIPress, UIPressesEvent, UIRectCorner, UIRectEdge, UIScreen,
-    UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITraitCollection,
-    UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
-    UIViewAutoresizing, UIViewController, UIViewLayoutRegion, UIViewLayoutRegionAdaptivityAxis,
-    UIWindow, UIWindowScene,
+    UICommand, UICornerConfiguration, UICornerRadius, UIDragAnimating, UIDragInteraction,
+    UIDragInteractionDelegate, UIDragItem, UIDragSession, UIDropInteraction,
+    UIDropInteractionDelegate, UIDropOperation, UIDropProposal, UIDropSession, UIEvent,
+    UIGestureRecognizer, UIGestureRecognizerDelegate, UIHoverGestureRecognizer, UIKeyCommand,
+    UIPanGestureRecognizer, UIPointerInteraction, UIPointerInteractionDelegate, UIPointerRegion,
+    UIPointerRegionRequest, UIPointerStyle, UIPress, UIPressesEvent, UIRectCorner, UIRectEdge,
+    UIScreen, UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITargetedDragPreview, UITouch,
+    UITraitCollection, UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle,
+    UIView, UIViewAutoresizing, UIViewController, UIViewLayoutRegion,
+    UIViewLayoutRegionAdaptivityAxis, UIWindow, UIWindowScene,
 };
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
@@ -334,6 +336,60 @@ define_class!(
         }
     }
 
+    unsafe impl UIDragInteractionDelegate for MetalView {
+        #[unsafe(method_id(dragInteraction:itemsForBeginningSession:))]
+        fn drag_items(
+            &self,
+            _interaction: &UIDragInteraction,
+            session: &ProtocolObject<dyn UIDragSession>,
+        ) -> Retained<NSArray<UIDragItem>> {
+            self.ivars()
+                .with_window(|window| drag::items(window, session, self))
+                .unwrap_or_else(NSArray::new)
+        }
+
+        #[unsafe(method_id(dragInteraction:previewForLiftingItem:session:))]
+        fn drag_lift_preview(
+            &self,
+            _interaction: &UIDragInteraction,
+            item: &UIDragItem,
+            session: &ProtocolObject<dyn UIDragSession>,
+        ) -> Option<Retained<UITargetedDragPreview>> {
+            Some(drag::lift_preview(item, session, self))
+        }
+
+        #[unsafe(method(dragInteraction:willAnimateLiftWithAnimator:session:))]
+        fn drag_lift_animating(
+            &self,
+            _interaction: &UIDragInteraction,
+            animator: &ProtocolObject<dyn UIDragAnimating>,
+            _session: &ProtocolObject<dyn UIDragSession>,
+        ) {
+            drag::lift_animating(self.ivars().0.borrow().clone(), animator);
+        }
+
+        #[unsafe(method(dragInteraction:sessionAllowsMoveOperation:))]
+        fn drag_allows_move(
+            &self,
+            _interaction: &UIDragInteraction,
+            _session: &ProtocolObject<dyn UIDragSession>,
+        ) -> bool {
+            // Another app gets a copy, as from `gpui_macos`; a drop on this
+            // window is GPUI's own.
+            false
+        }
+
+        #[unsafe(method(dragInteraction:session:didEndWithOperation:))]
+        fn drag_ended(
+            &self,
+            _interaction: &UIDragInteraction,
+            _session: &ProtocolObject<dyn UIDragSession>,
+            _operation: UIDropOperation,
+        ) {
+            self.ivars().with_window(drag::ended);
+        }
+    }
+
     unsafe impl UIPointerInteractionDelegate for MetalView {
         #[unsafe(method_id(pointerInteraction:regionForRequest:defaultRegion:))]
         fn pointer_region(
@@ -360,12 +416,19 @@ define_class!(
     }
 
     unsafe impl UIGestureRecognizerDelegate for MetalView {
-        // Only the back-gesture recognizer uses this view as its delegate.
+        // Only the back-gesture recognizer uses this view as its delegate, but
+        // the selector is also `UIView`'s own, which UIKit asks for every
+        // recognizer on the view: the drag interaction's lift among them,
+        // which must not become a back gesture.
         #[unsafe(method(gestureRecognizerShouldBegin:))]
         fn gesture_recognizer_should_begin(&self, recognizer: &UIGestureRecognizer) -> bool {
-            self.ivars()
-                .with_window(|window| window.begin_back_gesture(recognizer))
-                .unwrap_or(false)
+            if recognizer.isKindOfClass(UIScreenEdgePanGestureRecognizer::class()) {
+                self.ivars()
+                    .with_window(|window| window.begin_back_gesture(recognizer))
+                    .unwrap_or(false)
+            } else {
+                true
+            }
         }
     }
 );
@@ -446,6 +509,10 @@ pub(crate) struct IosWindowState {
     should_close_callback: CallbackSlot<Box<dyn FnMut() -> bool>>,
     /// Callback for hit test
     hit_test_callback: CallbackSlot<Box<dyn FnMut() -> Option<WindowControlArea>>>,
+    platform_drag_callback:
+        CallbackSlot<Box<dyn FnMut(Point<Pixels>) -> Option<ExternalDragPayload>>>,
+    /// Whether a system drag lifted from this window is under way.
+    drag_source: Cell<bool>,
     /// Callback for close
     close_callback: CallbackSlot<Box<dyn FnOnce()>>,
     /// Callback for appearance changes
@@ -565,6 +632,7 @@ impl IosWindow {
         view.addGestureRecognizer(&back_recognizer);
 
         drop::install(&view, ProtocolObject::from_ref(&*view), main_thread);
+        drag::install(&view, ProtocolObject::from_ref(&*view), main_thread);
 
         let pointer_target: &AnyObject = &view;
         let pointer_interaction = pointer::install(
@@ -624,6 +692,8 @@ impl IosWindow {
             moved_callback: CallbackSlot::default(),
             should_close_callback: CallbackSlot::default(),
             hit_test_callback: CallbackSlot::default(),
+            platform_drag_callback: CallbackSlot::default(),
+            drag_source: Cell::new(false),
             close_callback: CallbackSlot::default(),
             appearance_changed_callback: CallbackSlot::default(),
             insets_changed_callback: CallbackSlot::default(),
@@ -726,6 +796,25 @@ impl IosWindowState {
 
     pub(super) fn pointer(&self) -> &Pointer {
         &self.pointer
+    }
+
+    /// What GPUI drags from `position` as a system drag, if anything.
+    pub(super) fn request_platform_drag(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<ExternalDragPayload> {
+        self.platform_drag_callback
+            .with(|callback| callback(position))
+            .flatten()
+    }
+
+    pub(super) fn set_drag_source(&self, drag_source: bool) {
+        self.drag_source.set(drag_source);
+    }
+
+    /// Whether the system drag under way was lifted from this window.
+    pub(super) fn is_drag_source(&self) -> bool {
+        self.drag_source.get()
     }
 
     pub(super) fn set_pointer_input(&self, position: Point<Pixels>, modifiers: Modifiers) {
@@ -1273,6 +1362,13 @@ impl PlatformWindow for IosWindow {
 
     fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
         self.hit_test_callback.set(callback);
+    }
+
+    fn on_platform_drag_request(
+        &self,
+        callback: Box<dyn FnMut(Point<Pixels>) -> Option<ExternalDragPayload>>,
+    ) {
+        self.platform_drag_callback.set(callback);
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {

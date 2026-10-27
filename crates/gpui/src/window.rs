@@ -8,7 +8,7 @@ use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorHideMode, CursorStyle, CustomShaderId, CustomShaderInstance, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
+    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, ExternalDragPayload,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlowParams, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
@@ -1084,6 +1084,7 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
+    pub(crate) platform_drag_sources: Vec<PlatformDragSource>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1115,9 +1116,21 @@ pub(crate) struct PaintIndex {
     mouse_listeners_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
+    platform_drag_sources_index: usize,
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+}
+
+/// An element a platform-started drag can lift, registered while it paints:
+/// one with an [`Interactivity::external_drag_payload`](crate::Interactivity::external_drag_payload).
+#[derive(Clone)]
+pub(crate) struct PlatformDragSource {
+    pub(crate) hitbox: HitboxId,
+    /// Makes the element's drag, as a drag starting at the given position
+    /// would, together with the payload it offers the platform.
+    pub(crate) start:
+        Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App) -> Option<(AnyDrag, ExternalDragPayload)>>,
 }
 
 impl Frame {
@@ -1142,6 +1155,7 @@ impl Frame {
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
+            platform_drag_sources: Vec::new(),
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
@@ -1168,6 +1182,7 @@ impl Frame {
         self.input_handlers.clear();
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
+        self.platform_drag_sources.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
@@ -2099,6 +2114,17 @@ impl Window {
                     .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
                     .log_err()
                     .unwrap_or(DispatchEventResult::default())
+            })
+        });
+        platform_window.on_platform_drag_request({
+            let mut cx = cx.to_async();
+            Box::new(move |position| {
+                handle
+                    .update(&mut cx, |_, window, cx| {
+                        window.start_platform_drag(position, cx)
+                    })
+                    .log_err()
+                    .flatten()
             })
         });
         platform_window.on_hit_test_window_control({
@@ -4158,6 +4184,7 @@ impl Window {
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
+            platform_drag_sources_index: self.next_frame.platform_drag_sources.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
@@ -4178,6 +4205,10 @@ impl Window {
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]
                 .iter()
                 .cloned(),
+        );
+        self.next_frame.platform_drag_sources.extend_from_slice(
+            &self.rendered_frame.platform_drag_sources
+                [range.start.platform_drag_sources_index..range.end.platform_drag_sources_index],
         );
         self.next_frame.input_handlers.extend(
             self.rendered_frame.input_handlers
@@ -6149,6 +6180,53 @@ impl Window {
         {
             self.refresh();
         }
+    }
+
+    /// Registers an element a platform-started drag can lift. Called while
+    /// painting.
+    pub(crate) fn register_platform_drag_source(&mut self, source: PlatformDragSource) {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.platform_drag_sources.push(source);
+    }
+
+    /// Answers a platform that starts drags by its own gesture (iOS): the
+    /// payload to drag from `position`, or `None` to let the gesture fail.
+    ///
+    /// A drag already running in the window is handed over, as when it leaves
+    /// the window on the desktop; otherwise the topmost element at `position`
+    /// with an external drag payload starts its drag. Either way the drag is
+    /// the platform's from now on, and becomes GPUI's again while it is over
+    /// this window ([`FileDropEvent`]).
+    fn start_platform_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut App,
+    ) -> Option<ExternalDragPayload> {
+        let payload = if cx.active_drag.is_some() {
+            let payload_source = cx
+                .active_drag
+                .as_mut()
+                .and_then(|drag| drag.external_payload_source.take())?;
+            payload_source(self, cx)?
+        } else {
+            let hit_test = self.rendered_frame.hit_test(position);
+            let source = hit_test.ids.iter().find_map(|id| {
+                self.rendered_frame
+                    .platform_drag_sources
+                    .iter()
+                    .rev()
+                    .find(|source| source.hitbox == *id)
+                    .cloned()
+            })?;
+            let (drag, payload) = (source.start)(position, self, cx)?;
+            cx.active_drag = Some(drag);
+            payload
+        };
+        if !cx.hand_active_drag_to_platform(self.handle.window_id()) {
+            return None;
+        }
+        self.refresh();
+        Some(payload)
     }
 
     /// Whether recognized touch pans may use the platform's predicted touch
@@ -9713,6 +9791,75 @@ mod tests {
                 .child(div().w(px(50.)).h(px(50.)).track_focus(&self.a))
                 .child(div().w(px(50.)).h(px(50.)).track_focus(&self.b))
         }
+    }
+
+    /// A platform that starts drags by its own gesture (iOS) asks the window
+    /// what to drag: the element under the position starts its drag, which is
+    /// the platform's until it comes back over the window, where a drop is the
+    /// element's own drop.
+    #[gpui::test]
+    fn platform_started_drag_lifts_the_element_and_drops_back_as_its_drag(cx: &mut TestAppContext) {
+        let path = PathBuf::from("/tmp/lifted");
+        let observed_drops = Rc::new(RefCell::new(Vec::new()));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let path = path.clone();
+                let observed_drops = observed_drops.clone();
+                move |_, _| FileDragView {
+                    path,
+                    observed_drag_moves: Rc::default(),
+                    observed_drops,
+                }
+            })
+            .into();
+        let position = point(px(10.), px(10.));
+        let update_result = cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let payload = window.start_platform_drag(position, cx);
+            assert_eq!(
+                payload,
+                Some(ExternalDragPayload::Files(FileDragPaths::new([(
+                    path.clone(),
+                    true
+                )])))
+            );
+            assert!(cx.active_drag.is_none(), "the drag is the platform's");
+
+            window.dispatch_event(
+                FileDropEvent::Entered {
+                    position,
+                    paths: ExternalPaths::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(
+                cx.active_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.value.downcast_ref::<PathBuf>().is_some()),
+                "back over its window, the drag is the element's again"
+            );
+            window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+            window.dispatch_event(FileDropEvent::Exited.to_platform_input(), cx);
+            window.dispatch_event(FileDropEvent::Ended.to_platform_input(), cx);
+            assert!(cx.active_drag.is_none());
+        });
+        assert!(update_result.is_ok(), "{update_result:?}");
+        assert_eq!(*observed_drops.borrow(), [path]);
+    }
+
+    #[gpui::test]
+    fn platform_started_drag_needs_a_source_under_the_position(cx: &mut TestAppContext) {
+        let window: AnyWindowHandle = cx.add_window(|_, _| Empty).into();
+        let update_result = cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(
+                window.start_platform_drag(point(px(10.), px(10.)), cx),
+                None
+            );
+            assert!(cx.active_drag.is_none());
+        });
+        assert!(update_result.is_ok(), "{update_result:?}");
     }
 
     /// When a focus listener moves focus again (e.g. a dock forwarding focus to its

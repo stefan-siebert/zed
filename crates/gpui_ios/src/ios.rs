@@ -3,6 +3,7 @@
 mod application;
 mod display;
 mod document_picker;
+mod drag;
 mod drop;
 mod events;
 mod keyboard;
