@@ -43,7 +43,7 @@ gpui_apple = { workspace = true, features = ["font-kit"] }
 log.workspace = true
 objc2.workspace = true
 objc2-foundation = { workspace = true, features = ["NSThread", "NSOperation", "NSUserActivity", "block2", "NSItemProvider", "NSPathUtilities", "NSError", "NSProgress", "NSURL"] }
-objc2-ui-kit = { workspace = true, features = ["UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UIImage", "UIKeyCommand", "UIMenuLeaf", "UIHoverGestureRecognizer", "UIInteraction", "UIPointerInteraction", "UIPointerRegion", "UIPointerStyle", "UIHoverStyle", "UIDropInteraction", "UIDragSession", "UIDragItem", "UIDragInteraction", "UITargetedDragPreview", "UITargetedPreview", "UIDragPreviewParameters", "UIPreviewParameters", "UILabel", "UIFont", "UIFontDescriptor", "UIColor", "UIStringDrawing", "UIViewAnimating"] }
+objc2-ui-kit = { workspace = true, features = ["UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UIImage", "UIKeyCommand", "UIMenuLeaf", "UIHoverGestureRecognizer", "UIInteraction", "UIPointerInteraction", "UIPointerRegion", "UIPointerStyle", "UIHoverStyle", "UIDropInteraction", "UIDragSession", "UIDragItem", "UIDragInteraction", "UITargetedDragPreview", "UITargetedPreview", "UIDragPreviewParameters", "UIPreviewParameters", "UILabel", "UIFont", "UIFontDescriptor", "UIColor", "UIStringDrawing", "UIViewAnimating", "UIActivity", "UIActivityViewController", "UIPresentationController", "UIPopoverPresentationController", "UIPopoverSupport"] }
 objc2-quartz-core = { workspace = true, features = ["CADisplayLink"] }
 objc2-uniform-type-identifiers.workspace = true
 objc2-core-foundation = { workspace = true, default-features = true }

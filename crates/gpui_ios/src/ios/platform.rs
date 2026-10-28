@@ -387,8 +387,24 @@ impl Platform for IosPlatform {
         // iOS doesn't have a file manager like Finder
     }
 
-    fn open_with_system(&self, _path: &Path) {
-        // Would use UIDocumentInteractionController or UIActivityViewController
+    fn open_with_system(&self, path: &Path) {
+        // Presented from a task of its own, like the document picker.
+        let state = self.0.clone();
+        let path = path.to_path_buf();
+        self.0
+            .foreground_executor
+            .spawn(async move {
+                let platform = IosPlatform(state);
+                let (Some(root), Some(presenter)) = (
+                    platform.root_view_controller(),
+                    platform.presented_view_controller(),
+                ) else {
+                    log::error!("GPUI iOS: no view controller to present the share sheet on");
+                    return;
+                };
+                super::share_sheet::present(&root, &presenter, &path);
+            })
+            .detach();
     }
 
     fn on_quit(&self, mut callback: Box<dyn FnMut() -> bool>) {

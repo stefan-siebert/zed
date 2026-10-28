@@ -79,6 +79,15 @@ static STATUS_BAR_STYLE: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomi
 #[derive(Default)]
 pub(super) struct WindowReference(pub(super) RefCell<Weak<IosWindowState>>);
 
+/// Where the pointer or the last touch was in the GPUI window that
+/// `view_controller` belongs to, if it is one.
+pub(super) fn pointer_position_of(view_controller: &UIViewController) -> Option<Point<Pixels>> {
+    view_controller
+        .downcast_ref::<ViewController>()?
+        .ivars()
+        .with_window(IosWindowState::pointer_position)
+}
+
 impl WindowReference {
     pub(super) fn with_window<R>(&self, callback: impl FnOnce(&IosWindowState) -> R) -> Option<R> {
         let window = self.0.borrow().upgrade()?;
@@ -815,6 +824,11 @@ impl IosWindowState {
     /// Whether the system drag under way was lifted from this window.
     pub(super) fn is_drag_source(&self) -> bool {
         self.drag_source.get()
+    }
+
+    /// Where the pointer or the last touch was, in the view's points.
+    pub(super) fn pointer_position(&self) -> Point<Pixels> {
+        self.mouse_position.get()
     }
 
     pub(super) fn set_pointer_input(&self, position: Point<Pixels>, modifiers: Modifiers) {
