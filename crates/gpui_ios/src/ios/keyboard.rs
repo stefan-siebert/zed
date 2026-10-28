@@ -373,6 +373,12 @@ fn keystroke(key: &UIKey, flags: UIKeyModifierFlags) -> Option<(Keystroke, bool)
             };
             (name.to_string(), typed(&characters, types_text))
         }
+        // ⌘. is iPadOS's Escape — Apple's keyboards for the iPad have none
+        // — and UIKit makes it one itself: the "." key, the Command taken
+        // off, the characters `UIKeyInputEscape` (measured on iPadOS 27.0).
+        _ if key.charactersIgnoringModifiers().to_string() == "UIKeyInputEscape" => {
+            ("escape".to_string(), None)
+        }
         _ => {
             let ignoring = key.charactersIgnoringModifiers().to_string();
             // Keys without a name above report UIKit constants such as
