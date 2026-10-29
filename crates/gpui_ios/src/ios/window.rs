@@ -19,12 +19,13 @@ use super::text_input::TextInputView;
 use super::{CallbackSlot, IosDisplay, platform::IosPlatformState};
 use gpui::{
     AnyWindowHandle, BackGestureEvent, BackGesturePhase, BackgroundExecutor, Bounds, Capslock,
-    Corners, CursorStyle, DevicePixels, DispatchEventResult, DisplayId, Edges, ExternalDragPayload,
-    ForegroundExecutor, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    Scene, Size, TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowControlsInsets, WindowInsets, WindowParams, WindowVisibility, px, size,
+    Corners, CursorStyle, CustomShaderId, DevicePixels, DispatchEventResult, DisplayId, Edges,
+    ExternalDragPayload, ForegroundExecutor, GpuSpecs, Modifiers, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange,
+    TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowControlsInsets, WindowInsets, WindowParams, WindowVisibility, px,
+    size,
 };
 use gpui_apple::metal_renderer::{Context as MetalContext, MetalRenderer};
 use objc2::rc::Retained;
@@ -1407,6 +1408,13 @@ impl PlatformWindow for IosWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
+    }
+
+    /// The Metal renderer is the one macOS uses, custom shaders included.
+    fn register_custom_shader(&self, wgsl_fragment: &str, label: &str) -> Option<CustomShaderId> {
+        self.renderer
+            .lock()
+            .register_custom_shader(wgsl_fragment, label)
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
