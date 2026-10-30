@@ -32,6 +32,7 @@ mod gestures;
 mod global;
 #[cfg(gpui_hot_reload)]
 mod hot_reload;
+mod hot_reload_status;
 mod input;
 mod inspector;
 mod interactive;
@@ -224,6 +225,7 @@ pub use subscription::*;
     )
 ))]
 pub use subsecond;
+pub use hot_reload_status::HotReloadStatus;
 pub use svg_renderer::*;
 pub(crate) use tab_stop::*;
 use taffy::TaffyLayoutEngine;
