@@ -921,6 +921,12 @@ impl PlatformWindow for WindowsWindow {
             .ok();
     }
 
+    fn get_title(&self) -> String {
+        let mut buffer = vec![0u16; unsafe { GetWindowTextLengthW(self.0.hwnd) } as usize + 1];
+        let len = unsafe { GetWindowTextW(self.0.hwnd, &mut buffer) };
+        String::from_utf16_lossy(&buffer[..len as usize])
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.state.background_appearance.set(background_appearance);
         let hwnd = self.0.hwnd;
