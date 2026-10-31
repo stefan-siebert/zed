@@ -264,6 +264,12 @@ the binding swallowed the wildcard.
 |---|---|
 | `6efe33cb` | **`App::on_should_quit(handler)`**, answered by `applicationShouldTerminate:`. macOS ends an app on its own on the Dock's Quit, at logout and at shutdown; upstream does not implement the delegate method, so AppKit's default `NSTerminateNow` applied and an app could not refuse. `Platform::on_should_quit` (default: ignore — Windows/Linux have no such question) registers the callback; `gpui_macos` returns `NSTerminateCancel` when it says no. One handler returning `false` keeps the app running. `App::quit` sets `quit_requested` first: on macOS it ends in the same `terminate:`, and the quit the app asked for itself must not be refused. A borrowed `AppCell` when AppKit asks lets the quit through, as before. Test: `app::test::should_quit_asks_the_handlers_until_the_app_quits`. Elane refuses while file operations run and asks as on Cmd+Q (`MainWindow::allow_platform_quit`). |
 
+## 8a'. Path prompt: start folder and message (macOS)
+
+| Commit | Change |
+|---|---|
+| `171f6a8e13` | **`App::prompt_for_paths_placed(options, PathPromptPlacement { directory, message })`**: the path prompt opens in a folder of the caller's choice and shows a sentence above the file list (`NSOpenPanel` `directoryURL` / `message`). A struct beside `PathPromptOptions` rather than two new fields in it, because upstream builds that struct literally in sixteen places. `Platform::prompt_for_paths_placed` defaults to `prompt_for_paths` (placement ignored); only `gpui_macos` overrides it, and its `prompt_for_paths` is the placed one with an empty placement. Elane opens the panel in a folder the user refused it in macOS's privacy settings, with what to click; picking it there undoes the refusal. Verified in Elane in a macOS 27.2 VM on 2026-10-31: the panel started in the refused Desktop with the message, "Allow Access" without a selection returned the Desktop. |
+
 ## 8b. Window-control insets (iPadOS)
 
 | Commit | Change |
