@@ -444,6 +444,16 @@ pub trait Platform: 'static {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>>;
+    /// [`Self::prompt_for_paths`], starting where `placement` says and
+    /// explaining what to pick. A platform without either ignores it.
+    fn prompt_for_paths_placed(
+        &self,
+        options: PathPromptOptions,
+        placement: PathPromptPlacement,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        let _ = placement;
+        self.prompt_for_paths(options)
+    }
     fn prompt_for_new_path(
         &self,
         directory: &Path,
@@ -2993,6 +3003,17 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+}
+
+/// Where a path prompt starts and what it tells the user — beside
+/// [`PathPromptOptions`] rather than in it, so that upstream's struct
+/// literals of the options stay valid (fork addition).
+#[derive(Clone, Debug, Default)]
+pub struct PathPromptPlacement {
+    /// The folder the prompt shows first.
+    pub directory: Option<PathBuf>,
+    /// A sentence above the file list: what to pick and why.
+    pub message: Option<SharedString>,
 }
 
 /// What kind of prompt styling to show

@@ -27,10 +27,10 @@ use futures::channel::oneshot;
 use gpui::{
     Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
     CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu, MenuItem,
-    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task,
-    ThermalState, WindowAppearance, WindowKind, WindowParams, WindowingRequest,
-    popup::PopupNotSupportedError,
+    OsMenu, OwnedMenu, PathPromptOptions, PathPromptPlacement, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result,
+    SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind, WindowParams,
+    WindowingRequest, popup::PopupNotSupportedError,
 };
 use gpui_apple::{
     keychain,
@@ -905,7 +905,15 @@ impl Platform for MacPlatform {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        use objc2_foundation::NSString;
+        self.prompt_for_paths_placed(options, PathPromptPlacement::default())
+    }
+
+    fn prompt_for_paths_placed(
+        &self,
+        options: PathPromptOptions,
+        placement: PathPromptPlacement,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        use objc2_foundation::{NSString, NSURL};
 
         let marker = self.1;
         let (done_tx, done_rx) = oneshot::channel();
@@ -941,6 +949,13 @@ impl Platform for MacPlatform {
 
                 if let Some(prompt) = options.prompt {
                     panel.setPrompt(Some(&NSString::from_str(prompt.as_str())));
+                }
+                if let Some(directory) = placement.directory.as_deref() {
+                    let url = NSURL::from_directory_path(directory);
+                    panel.setDirectoryURL(url.as_deref());
+                }
+                if let Some(message) = placement.message {
+                    panel.setMessage(Some(&NSString::from_str(message.as_str())));
                 }
 
                 panel.beginWithCompletionHandler(&handler);
