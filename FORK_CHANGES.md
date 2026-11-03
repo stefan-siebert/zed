@@ -270,6 +270,12 @@ the binding swallowed the wildcard.
 |---|---|
 | `171f6a8e13` | **`App::prompt_for_paths_placed(options, PathPromptPlacement { directory, message })`**: the path prompt opens in a folder of the caller's choice and shows a sentence above the file list (`NSOpenPanel` `directoryURL` / `message`). A struct beside `PathPromptOptions` rather than two new fields in it, because upstream builds that struct literally in sixteen places. `Platform::prompt_for_paths_placed` defaults to `prompt_for_paths` (placement ignored); only `gpui_macos` overrides it, and its `prompt_for_paths` is the placed one with an empty placement. Elane opens the panel in a folder the user refused it in macOS's privacy settings, with what to click; picking it there undoes the refusal. Verified in Elane in a macOS 27.2 VM on 2026-10-31: the panel started in the refused Desktop with the message, "Allow Access" without a selection returned the Desktop. |
 
+## 8a''. Momentum scrolling marked (macOS)
+
+| Commit | Change |
+|---|---|
+| `64704d122f` | **`ScrollSource::Momentum`**: a scroll event whose `NSEvent.momentumPhase` is set — the coasting macOS sends after a trackpad swipe ends — is reported with this source instead of `Pointer`. Containers scroll with it as before (nothing reads `source` to decide whether to scroll); a consumer that turns scrolling into discrete steps leaves it out. A new variant rather than a field because upstream builds `ScrollEvent` literally in about twenty places and nothing matches on `ScrollSource`. Elane's Cmd+wheel zoom (`file_panel/zoom_hud.rs`) drops these events. Note: a Logitech mouse under Options+ (smooth scrolling) sets neither phase nor momentum phase (measured 2026-11-03), so this helps trackpads and the Magic Mouse only. |
+
 ## 8b. Window-control insets (iPadOS)
 
 | Commit | Change |
