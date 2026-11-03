@@ -12,7 +12,7 @@ use crate::{
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlowParams, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, NativeDragIcon, NativeDragMode, NativeDragResult, Path, Pixels,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
@@ -55,7 +55,6 @@ use std::{
     marker::PhantomData,
     mem,
     ops::{DerefMut, Range},
-    path::PathBuf,
     rc::Rc,
     sync::{
         Arc, Weak,
@@ -3040,20 +3039,6 @@ impl Window {
             origin: Point::default(),
             size: self.viewport_size,
         }
-    }
-
-    /// Start a native platform drag operation with the given file paths.
-    /// The OS takes ownership of the drag visual and handles cross-window/cross-app drops.
-    /// The callback is invoked with the result when the drag completes or is cancelled.
-    pub fn start_native_drag(
-        &self,
-        paths: Vec<PathBuf>,
-        icon: Option<NativeDragIcon>,
-        mode: NativeDragMode,
-        callback: Box<dyn FnOnce(NativeDragResult) + Send>,
-    ) -> Result<()> {
-        self.platform_window
-            .start_native_drag(paths, icon, mode, callback)
     }
 
     /// Returns the platform's visible viewport in window-local logical pixels.
@@ -6052,7 +6037,6 @@ impl Window {
                             view: cx.new(|_| paths).into(),
                             cursor_offset: position,
                             cursor_style: None,
-                            is_external: false,
                             external_payload_source: None,
                         });
                     }
@@ -6441,19 +6425,6 @@ impl Window {
 
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {
-                // Update is_external flag based on whether cursor is inside the viewport.
-                let viewport = self.viewport_bounds();
-                if let Some(drag) = &mut cx.active_drag {
-                    let was_external = drag.is_external;
-                    drag.is_external = !viewport.contains(&self.mouse_position);
-
-                    // When re-entering the viewport, force a refresh to restore
-                    // the internal drag visual.
-                    if was_external && !drag.is_external {
-                        self.refresh();
-                    }
-                }
-
                 // If this was a mouse move event, redraw the window so that the
                 // active drag can follow the mouse cursor.
                 self.refresh();

@@ -182,16 +182,24 @@ frame). Both must survive upstream merges:
 | `c4724161` | Ungate `render_to_image` on macOS + clean stale `NSBeep` unsafe |
 | `655b9091` | wgpu `render_to_image`: derive `premultiplied_alpha` from the surface alpha mode like `draw()` — the hardcoded 0 fed straight-alpha shader output into premultiplied-blending pipelines and bleached the whole offscreen frame toward white on PreMultiplied surfaces (inspector screenshots looked washed out while the live window was correct) |
 
-## 4. Native drag-and-drop
+## 4. Outbound file drag (Windows)
+
+**Since 2026-11-03 the fork carries only the Windows platform half of
+upstream's outbound drag.** Upstream's API — `Interactivity::external_drag_payload`,
+promoted by `Window::promote_external_drag_to_platform` when the pointer leaves
+the viewport, `PlatformWindow::{can_start_external_drag, start_external_drag}`,
+`FileDropEvent::Ended` — came with the 2026-08-04 merge (`f52fd9ac4` macOS,
+`c7aea6cbb` Wayland); Windows and X11 have no upstream implementation.
 
 | Commit | Change |
 |---|---|
-| `c9833333` | Native drag-and-drop for Linux/Wayland |
-| `0d9e0d0c` | Windows native drag image DPI scaling + cursor offset sync |
-| `0998e6f5` | **Kept alongside upstream's own outbound-drag support.** The 2026-08-04 merge brought `c7aea6cbb` (`wl_data_source` outbound drags), `f52fd9ac4` (macOS file drag-out) and the `AnyDrag::external_payload_source` / `Interactivity::external_drag_payload` API. That path promotes an internal drag automatically when the pointer leaves the viewport, but hands the platform only `FileDragPaths` — the drag image is the platform's. Ours (`Window::start_native_drag` + `AnyDrag::is_external`) lets the caller pass a rendered icon, which Elane's file table uses (`file_table.rs`: `render_drag_icon` + `NativeDragMode`). Both are live; on Wayland they are separated by a third dispatch userdata, `DataSourceKind::NativeDrag`, so `wl_data_source` events route to the right one without comparing object ids. **If Elane ever gives up the custom drag image, delete our half and use upstream's — carrying both is the cost of that image.** |
-| `7080cc83` | Suppress unused `Result` warning for `SetForegroundWindow` |
+| 2026-11-03 | `gpui_windows`: `can_start_external_drag` / `start_external_drag`. The paths are posted to the window (`WM_GPUI_EXTERNAL_DRAG`, `WM_USER + 100`) so `SHDoDragDrop` runs outside GPUI's borrows; afterwards `FileDropEvent::Ended` goes to the input callback. The drag image is the Shell's generic one (`hwnd` none, none in the data object); only `DROPEFFECT_COPY` is offered — with move, Explorer moves on the same volume by default. |
+| 2026-11-03, removed | Our own `Window::start_native_drag` (`c9833333` Wayland, Windows `DoDragDrop` with `0d9e0d0c` DPI-scaled drag image), `NativeDragIcon` / `NativeDragMode` / `NativeDragResult`, `AnyDrag::is_external` / `DragMoveEvent::is_external` and the Wayland `DataSourceKind::NativeDrag`. They predated upstream's API (2026-03) and were kept beside it only for the caller-rendered drag image (`0998e6f5`). macOS never had them — Elane's file table called `start_native_drag` there and got "native drag not supported" from 2026-03 on. Elane gave up the image and uses `external_drag_payload` everywhere. |
 
-New file: `gpui_windows/src/native_drag.rs` (+522).
+`gpui_windows/src/native_drag.rs`: `IDropSource`, a `CF_HDROP` `IDataObject`
+whose `SetData` keeps what the Shell's drag-image manager stores, and
+`do_external_drag`. Untested on Windows itself at the time of writing — only
+`cargo xtask check-windows` from macOS compiled it.
 
 ## 5. Clipboard
 
@@ -318,7 +326,7 @@ the binding swallowed the wildcard.
 
 | Commit | Change |
 |---|---|
-| `011ea00b70` | **`UIDropInteraction` on the Metal view → `FileDropEvent`** (`gpui_ios/src/ios/drop.rs`; upstream took no drops). Drags from other apps only (`localDragSession` none). UIKit hands out no paths while a drag hovers, so it enters with an empty `ExternalPaths` (drop targets still highlight) and moves as `Pending`; on `performDrop` every item loads asynchronously, and once all have, the drag exits and enters again with the paths, is submitted at the drop position and exits — as AppKit's conclude. An item loads **in place** where its provider registered a type for that (`registeredTypeIdentifiersWithFileOptions(OpenInPlace)`, tried first — measured, the Files app lists a private `com.apple.DocumentManager.FINode.Location` before `public.folder`, and that first type yields only a copy), and `security_scope::start_accessing` keeps its scope; otherwise the provider's copy, which UIKit deletes when the handler returns, is moved to `tmp/GPUIDrops/<stamp>-<n>/` on the provider's queue. Measured in the iPadOS 27.0 simulator with XCUITest dragging between two windows: a photo from Photos arrives as a copy (5.3 MB, readable), the folder "Picker-Test" from the Files app in place (`…/File Provider Storage/Picker-Test`, readable). **Not built: dragging out of a GPUI app** — UIKit starts a drag only from a `UIDragInteraction` it drives by gesture, so `start_native_drag` has no iOS equivalent; it needs a new GPUI concept. |
+| `011ea00b70` | **`UIDropInteraction` on the Metal view → `FileDropEvent`** (`gpui_ios/src/ios/drop.rs`; upstream took no drops). Drags from other apps only (`localDragSession` none). UIKit hands out no paths while a drag hovers, so it enters with an empty `ExternalPaths` (drop targets still highlight) and moves as `Pending`; on `performDrop` every item loads asynchronously, and once all have, the drag exits and enters again with the paths, is submitted at the drop position and exits — as AppKit's conclude. An item loads **in place** where its provider registered a type for that (`registeredTypeIdentifiersWithFileOptions(OpenInPlace)`, tried first — measured, the Files app lists a private `com.apple.DocumentManager.FINode.Location` before `public.folder`, and that first type yields only a copy), and `security_scope::start_accessing` keeps its scope; otherwise the provider's copy, which UIKit deletes when the handler returns, is moved to `tmp/GPUIDrops/<stamp>-<n>/` on the provider's queue. Measured in the iPadOS 27.0 simulator with XCUITest dragging between two windows: a photo from Photos arrives as a copy (5.3 MB, readable), the folder "Picker-Test" from the Files app in place (`…/File Provider Storage/Picker-Test`, readable). **Not built: dragging out of a GPUI app** — UIKit starts a drag only from a `UIDragInteraction` it drives by gesture, so there was no iOS equivalent of a drag started on request; it needs a new GPUI concept. |
 
 ## 8i. Dragging files out to other apps (iOS)
 
@@ -392,7 +400,7 @@ will land on this shape, not the one the sections above describe.
 |---|---|
 | `gpui_macos/src/{metal_renderer,metal_atlas,shaders.metal}` | `gpui_apple/src/…` — upstream extracted the crate. The fork's own `metal_custom_shader.rs` moved with them (its only caller is `metal_renderer.rs`), and the `naga` dependency moved from `gpui_macos` to `gpui_apple`. |
 | `PlatformWindow::completed_frame` | `PlatformWindow::schedule_frame`. Upstream removed the former with the demand-driven Wayland loop (#60690). The Wayland backend's fork patches sit on the new loop: the `closed` guard and the `pending_drawable_size` / `pending_viewport_dest` deferral are unchanged, `force_render_after_recovery` became upstream's `redraw_requested` (the field itself is gone; **X11 still has its own**), and the wlroots empty-commit workaround is dropped — `complete_frame`'s presentation state machine commits on the `RetryAfterPresent` path instead. |
-| `WM_GPUI_NATIVE_DRAG = WM_USER + 9` | `WM_USER + 100`. Upstream's new `WM_GPUI_END_SESSION` took `+9`. Fork window messages start at `+100` from now on, so upstream can keep growing its block one at a time. |
+| `WM_GPUI_NATIVE_DRAG = WM_USER + 9` | `WM_USER + 100` (renamed `WM_GPUI_EXTERNAL_DRAG` on 2026-11-03). Upstream's new `WM_GPUI_END_SESSION` took `+9`. Fork window messages start at `+100` from now on, so upstream can keep growing its block one at a time. |
 | Two `DirectXRenderer::render_to_image` | One. Upstream grew its own — device-lost guard, `background_appearance`, and it goes through `render` rather than duplicating the batch loop — so the fork's copy is gone and upstream's is ungated instead, which is all the fork ever wanted from it. |
 
 One thing to watch on the next merge: the throttled-configure early return in

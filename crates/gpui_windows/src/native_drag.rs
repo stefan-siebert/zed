@@ -1,44 +1,38 @@
-//! Windows native drag-and-drop source implementation.
+//! Windows outbound file drag: the platform half of GPUI's
+//! `Interactivity::external_drag_payload`.
 //!
-//! Provides COM objects (`IDropSource`, `IDataObject`) needed to initiate an
-//! outbound OLE drag operation via `DoDragDrop`, allowing files to be dragged
-//! from the application to external Windows programs (Explorer, etc.).
+//! When an internal drag carrying an external payload leaves the window, GPUI
+//! calls `PlatformWindow::start_external_drag`; the window posts the paths to
+//! itself (`WM_GPUI_EXTERNAL_DRAG`) and `do_external_drag` runs the OLE drag
+//! from a clean message-processing context. The COM objects here
+//! (`IDropSource`, a `CF_HDROP` `IDataObject`) are what `SHDoDragDrop` needs.
 
 use std::cell::RefCell;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use gpui::{NativeDragIcon, NativeDragMode, NativeDragResult};
-
-/// Data passed via `PostMessageW` to defer `DoDragDrop` outside of GPUI borrows.
-pub(crate) struct NativeDragRequest {
-    pub paths: Vec<PathBuf>,
-    pub icon: Option<NativeDragIcon>,
-    pub mode: NativeDragMode,
-    pub callback: Box<dyn FnOnce(NativeDragResult) + Send>,
-}
 use windows::{
     Win32::{
         Foundation::*,
-        Graphics::Gdi::{
-            CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-            DIB_RGB_COLORS, HBITMAP,
-        },
         System::{
             Com::{
-                IStream, 
-                FORMATETC, IDataObject, IDataObject_Impl, IEnumFORMATETC, STGMEDIUM, TYMED_HGLOBAL, TYMED_ISTREAM,
+                FORMATETC, IDataObject, IDataObject_Impl, IEnumFORMATETC, IStream, STGMEDIUM,
+                TYMED_HGLOBAL, TYMED_ISTREAM,
             },
             Memory::*,
             Ole::*,
             SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
         },
-        UI::Shell::{
-            CLSID_DragDropHelper, DROPFILES, IDragSourceHelper, SHDRAGIMAGE, SHCreateStdEnumFmtEtc,
-        },
+        UI::Shell::{DROPFILES, SHCreateStdEnumFmtEtc, SHDoDragDrop},
     },
     core::*,
 };
+
+/// The paths of one outbound drag, boxed into the `LPARAM` of
+/// `WM_GPUI_EXTERNAL_DRAG` so `SHDoDragDrop` runs outside GPUI's borrows.
+pub(crate) struct ExternalDragRequest {
+    pub paths: Vec<PathBuf>,
+}
 
 const DVASPECT_CONTENT: u32 = 1;
 
@@ -51,11 +45,7 @@ struct DropSource;
 
 #[allow(non_snake_case)]
 impl IDropSource_Impl for DropSource_Impl {
-    fn QueryContinueDrag(
-        &self,
-        fescapepressed: BOOL,
-        grfkeystate: MODIFIERKEYS_FLAGS,
-    ) -> HRESULT {
+    fn QueryContinueDrag(&self, fescapepressed: BOOL, grfkeystate: MODIFIERKEYS_FLAGS) -> HRESULT {
         if fescapepressed.as_bool() {
             DRAGDROP_S_CANCEL
         } else if !grfkeystate.contains(MK_LBUTTON) {
@@ -139,7 +129,7 @@ impl IDataObject_Impl for FileDataObject_Impl {
         let index = self
             .find_entry(pformatetc)
             .ok_or_else(|| Error::new(DV_E_FORMATETC, "unsupported format"))?;
-        
+
         let entries = self.extra.borrow();
         let source_entry = &entries[index];
         let medium_type = source_entry.medium.tymed;
@@ -174,7 +164,8 @@ impl IDataObject_Impl for FileDataObject_Impl {
             copied_medium.u.hGlobal = copy;
             Ok(copied_medium)
         } else if medium_type == TYMED_ISTREAM.0 as u32 {
-            let source_stream: std::mem::ManuallyDrop<Option<IStream>> = unsafe { std::ptr::read(&source_entry.medium.u.pstm) };
+            let source_stream: std::mem::ManuallyDrop<Option<IStream>> =
+                unsafe { std::ptr::read(&source_entry.medium.u.pstm) };
             if let Some(stream) = &*source_stream {
                 let cloned_stream = unsafe { stream.Clone()? };
                 copied_medium.u.pstm = std::mem::ManuallyDrop::new(Some(cloned_stream));
@@ -183,7 +174,10 @@ impl IDataObject_Impl for FileDataObject_Impl {
             return Err(Error::new(E_FAIL, "Empty IStream"));
         } else {
             // Unhandled TYMED for deep cloning
-            Err(Error::new(DV_E_TYMED, "GetData clone not implemented for TYMED"))
+            Err(Error::new(
+                DV_E_TYMED,
+                "GetData clone not implemented for TYMED",
+            ))
         }
     }
 
@@ -221,7 +215,11 @@ impl IDataObject_Impl for FileDataObject_Impl {
 
         log::debug!(
             "IDataObject::SetData called: cfFormat={}, dwAspect={}, tymed={}, medium.tymed={}, frelease={}",
-            fmt.cfFormat, fmt.dwAspect, fmt.tymed, medium.tymed, frelease.0
+            fmt.cfFormat,
+            fmt.dwAspect,
+            fmt.tymed,
+            medium.tymed,
+            frelease.0
         );
 
         // STGMEDIUM must be fully owned since it will be kept in memory for the duration of the drag.
@@ -229,7 +227,7 @@ impl IDataObject_Impl for FileDataObject_Impl {
             // The shell gave us ownership.
             let mut stg = STGMEDIUM::default();
             stg.tymed = medium.tymed;
-            
+
             // Transfer unions manually based on tymed. This is unsafe but Windows OLE relies on this layout.
             // When taking ownership, we must copy the fields directly.
             unsafe {
@@ -272,7 +270,8 @@ impl IDataObject_Impl for FileDataObject_Impl {
                 }
                 stg.u.hGlobal = copy;
             } else if medium.tymed == TYMED_ISTREAM.0 as u32 {
-                let source_stream: std::mem::ManuallyDrop<Option<IStream>> = unsafe { std::ptr::read(&medium.u.pstm) };
+                let source_stream: std::mem::ManuallyDrop<Option<IStream>> =
+                    unsafe { std::ptr::read(&medium.u.pstm) };
                 if let Some(stream) = &*source_stream {
                     let cloned_stream = unsafe { stream.Clone()? };
                     stg.u.pstm = std::mem::ManuallyDrop::new(Some(cloned_stream));
@@ -315,15 +314,24 @@ impl IDataObject_Impl for FileDataObject_Impl {
         _advf: u32,
         _padvsink: windows::core::Ref<'_, windows::Win32::System::Com::IAdviseSink>,
     ) -> Result<u32> {
-        Err(Error::new(OLE_E_ADVISENOTSUPPORTED, "DAdvise not supported"))
+        Err(Error::new(
+            OLE_E_ADVISENOTSUPPORTED,
+            "DAdvise not supported",
+        ))
     }
 
     fn DUnadvise(&self, _dwconnection: u32) -> Result<()> {
-        Err(Error::new(OLE_E_ADVISENOTSUPPORTED, "DUnadvise not supported"))
+        Err(Error::new(
+            OLE_E_ADVISENOTSUPPORTED,
+            "DUnadvise not supported",
+        ))
     }
 
     fn EnumDAdvise(&self) -> Result<windows::Win32::System::Com::IEnumSTATDATA> {
-        Err(Error::new(OLE_E_ADVISENOTSUPPORTED, "EnumDAdvise not supported"))
+        Err(Error::new(
+            OLE_E_ADVISENOTSUPPORTED,
+            "EnumDAdvise not supported",
+        ))
     }
 }
 
@@ -373,150 +381,29 @@ fn build_cf_hdrop(paths: &[PathBuf]) -> anyhow::Result<HGLOBAL> {
 }
 
 // ---------------------------------------------------------------------------
-// Drag icon → HBITMAP conversion
-// ---------------------------------------------------------------------------
-
-/// Convert a `NativeDragIcon` (ARGB8888 pre-multiplied) to a 32-bit DIB
-/// section HBITMAP suitable for `IDragSourceHelper::InitializeFromBitmap`.
-///
-/// The shell requires a DIB section (not a DDB from `CreateBitmap`) so that
-/// the alpha channel is preserved for the drag image overlay.
-fn create_drag_bitmap(icon: &NativeDragIcon) -> anyhow::Result<HBITMAP> {
-    let width = icon.width as i32;
-    let height = icon.height as i32;
-
-    let mut bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            // Negative height = top-down DIB (row 0 is the top, matching our pixel layout).
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0 as u32,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbitmap = unsafe {
-        CreateDIBSection(
-            None,
-            &mut bmi,
-            DIB_RGB_COLORS,
-            &mut bits_ptr,
-            None,
-            0,
-        )?
-    };
-
-    if bits_ptr.is_null() {
-        anyhow::bail!("CreateDIBSection returned null bits pointer");
-    }
-
-    // Copy our pre-multiplied ARGB pixels into the DIB section.
-    let pixel_count = (width * height) as usize;
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            icon.pixels.as_ptr(),
-            bits_ptr as *mut u32,
-            pixel_count.min(icon.pixels.len()),
-        );
-    }
-
-    Ok(hbitmap)
-}
-
-// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Perform an OLE drag-and-drop operation with the given file paths.
+/// Run an OLE drag of `paths` and return once it is dropped or cancelled.
 ///
-/// **Must be called from a thread with OLE initialized** (the main/UI thread
-/// satisfies this since `OleInitialize` is called at platform startup).
+/// **Must be called on the UI thread** (OLE is initialized there at platform
+/// startup). `SHDoDragDrop` runs a nested message loop until the drag ends,
+/// so the caller must hold no GPUI borrow — hence the posted message.
 ///
-/// `DoDragDrop` is a blocking call — it runs a nested message loop until the
-/// user drops or cancels. The caller is responsible for ensuring this is
-/// acceptable (e.g. calling from the UI thread during a mouse-drag gesture).
-pub(crate) fn do_native_drag(
-    paths: Vec<PathBuf>,
-    icon: Option<NativeDragIcon>,
-    mode: NativeDragMode,
-    callback: Box<dyn FnOnce(NativeDragResult) + Send>,
-) -> anyhow::Result<()> {
+/// The drag image is the Shell's: `hwnd` is `None` and the data object
+/// carries none, so the Shell provides a generic one (Vista and later,
+/// per the `SHDoDragDrop` documentation) — as the macOS and Wayland halves
+/// leave the image to their platforms. Only copy is offered: with move
+/// allowed, Explorer moves on the same volume by default and takes the
+/// files out from under the panel they were dragged from (macOS offers
+/// copy alone outside the app for the same reason).
+pub(crate) fn do_external_drag(paths: Vec<PathBuf>) -> anyhow::Result<()> {
     if paths.is_empty() {
         anyhow::bail!("no paths to drag");
     }
-
     let data_object: IDataObject = FileDataObject::new(&paths)?.into();
     let drop_source: IDropSource = DropSource.into();
-
-    // Attach a drag image via IDragSourceHelper if we have an icon.
-    let mut drag_bitmap: Option<HBITMAP> = None;
-    if let Some(ref icon_data) = icon {
-        if let Ok(helper) = create_drag_source_helper() {
-            if let Ok(hbitmap) = create_drag_bitmap(icon_data) {
-                let sdi = SHDRAGIMAGE {
-                    sizeDragImage: SIZE {
-                        cx: icon_data.width as i32,
-                        cy: icon_data.height as i32,
-                    },
-                    ptOffset: POINT {
-                        x: icon_data.offset.x.0,
-                        y: icon_data.offset.y.0,
-                    },
-                    hbmpDragImage: hbitmap,
-                    crColorKey: COLORREF(0xFFFFFFFF), // CLR_NONE — use per-pixel alpha
-                };
-                unsafe {
-                    match helper.InitializeFromBitmap(&sdi, &data_object) {
-                        Ok(()) => {
-                            log::debug!("IDragSourceHelper::InitializeFromBitmap succeeded");
-                            drag_bitmap = None;
-                        }
-                        Err(err) => {
-                            log::warn!("IDragSourceHelper::InitializeFromBitmap failed: {err}");
-                            drag_bitmap = Some(hbitmap);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let allowed_effects = match mode {
-        NativeDragMode::Copy => DROPEFFECT_COPY,
-        NativeDragMode::Move => DROPEFFECT_MOVE,
-    };
-
-    let mut result_effect = DROPEFFECT_NONE;
-    let hr = unsafe { DoDragDrop(&data_object, &drop_source, allowed_effects, &mut result_effect) };
-
-    if let Some(hbm) = drag_bitmap {
-        unsafe {
-            let _ = DeleteObject(hbm.into());
-        }
-    }
-
-    let result = if hr == DRAGDROP_S_DROP {
-        NativeDragResult::Dropped
-    } else {
-        NativeDragResult::Cancel
-    };
-
-    callback(result);
+    let effect = unsafe { SHDoDragDrop(None, &data_object, &drop_source, DROPEFFECT_COPY)? };
+    log::debug!("external drag ended with effect {}", effect.0);
     Ok(())
-}
-
-fn create_drag_source_helper() -> anyhow::Result<IDragSourceHelper> {
-    unsafe {
-        let helper: IDragSourceHelper = windows::Win32::System::Com::CoCreateInstance(
-            &CLSID_DragDropHelper,
-            None,
-            windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
-        )?;
-        Ok(helper)
-    }
 }

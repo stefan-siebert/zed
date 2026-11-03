@@ -1105,32 +1105,41 @@ impl PlatformWindow for WindowsWindow {
         let _ = unsafe { MessageBeep(MB_OK) };
     }
 
-    fn start_native_drag(
-        &self,
-        paths: Vec<PathBuf>,
-        icon: Option<NativeDragIcon>,
-        mode: NativeDragMode,
-        callback: Box<dyn FnOnce(NativeDragResult) + Send>,
-    ) -> Result<()> {
-        // DoDragDrop runs a nested Win32 message loop which would re-enter
-        // GPUI callbacks while RefCells are still borrowed.  Defer it via
-        // PostMessageW so it executes in a clean message-processing context.
-        let request = Box::new(crate::native_drag::NativeDragRequest {
-            paths,
-            icon,
-            mode,
-            callback,
-        });
-        let lparam = LPARAM(Box::into_raw(request) as isize);
-        unsafe {
+    fn can_start_external_drag(&self) -> bool {
+        true
+    }
+
+    fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
+        let ExternalDragPayload::Files(files) = payload;
+        let paths: Vec<PathBuf> = files
+            .entries()
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect();
+        if paths.is_empty() {
+            return false;
+        }
+        // SHDoDragDrop runs a nested Win32 message loop which would re-enter
+        // GPUI callbacks while RefCells are still borrowed (this is called
+        // from inside the input callback). Defer it via PostMessageW so it
+        // runs in a clean message-processing context.
+        let request = Box::new(crate::native_drag::ExternalDragRequest { paths });
+        let raw = Box::into_raw(request);
+        let posted = unsafe {
             PostMessageW(
                 Some(self.0.hwnd),
-                crate::events::WM_GPUI_NATIVE_DRAG,
+                crate::events::WM_GPUI_EXTERNAL_DRAG,
                 WPARAM(0),
-                lparam,
-            )?;
+                LPARAM(raw as isize),
+            )
+        };
+        if let Err(err) = posted {
+            // Nobody will receive the box: take it back.
+            drop(unsafe { Box::from_raw(raw) });
+            log::warn!("start_external_drag: PostMessageW failed: {err}");
+            return false;
         }
-        Ok(())
+        true
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {

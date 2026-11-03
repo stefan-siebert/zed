@@ -30,11 +30,11 @@ pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
 
 // This fork's own window messages start at +100, well clear of the block
-// upstream is growing one at a time: WM_GPUI_NATIVE_DRAG sat at +9 until the
+// upstream is growing one at a time: the drag message sat at +9 until the
 // 2026-09-01 merge, where upstream's new WM_GPUI_END_SESSION took that exact
 // number. A gap this wide keeps the next upstream addition from silently
 // aliasing a fork message again.
-pub(crate) const WM_GPUI_NATIVE_DRAG: u32 = WM_USER + 100;
+pub(crate) const WM_GPUI_EXTERNAL_DRAG: u32 = WM_USER + 100;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -167,18 +167,20 @@ impl WindowsWindowInner {
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
-            WM_GPUI_NATIVE_DRAG => {
-                // lparam carries a boxed NativeDragRequest allocated by start_native_drag.
+            WM_GPUI_EXTERNAL_DRAG => {
+                // lparam carries a boxed ExternalDragRequest allocated by
+                // start_external_drag.
                 let request = unsafe {
-                    Box::from_raw(lparam.0 as *mut crate::native_drag::NativeDragRequest)
+                    Box::from_raw(lparam.0 as *mut crate::native_drag::ExternalDragRequest)
                 };
-                if let Err(err) = crate::native_drag::do_native_drag(
-                    request.paths,
-                    request.icon,
-                    request.mode,
-                    request.callback,
-                ) {
-                    log::warn!("native drag failed: {err}");
+                if let Err(err) = crate::native_drag::do_external_drag(request.paths) {
+                    log::warn!("external drag failed: {err}");
+                }
+                // The drag is over, dropped or not: GPUI gives up the drag it
+                // handed to the platform (`App::end_platform_drag`).
+                if let Some(mut func) = self.state.callbacks.input.take() {
+                    func(PlatformInput::FileDrop(FileDropEvent::Ended));
+                    self.state.callbacks.input.set(Some(func));
                 }
                 // DoDragDrop's nested message loop may have deactivated our window
                 // (WM_ACTIVATE → WA_INACTIVE). Restore focus so keyboard input works.

@@ -3641,14 +3641,6 @@ pub struct AnyDrag {
     /// The cursor style to use while dragging
     pub cursor_style: Option<CursorStyle>,
 
-    /// Whether the drag cursor is currently outside the window viewport.
-    /// When `true`, the application can hand off to native platform drag and drop
-    /// itself via [`Window::start_native_drag`], which lets the caller supply its
-    /// own drag image. Kept alongside upstream's `external_payload_source` below:
-    /// that one promotes automatically but hands the platform only paths, so the
-    /// caller loses control of the drag image. Elane's file table uses this field.
-    pub is_external: bool,
-
     /// Resolves the payload to offer the platform if the drag leaves the window.
     /// Invoked at most once per drag gesture, at promotion time.
     pub external_payload_source: Option<ExternalDragPayloadSource>,

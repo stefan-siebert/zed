@@ -2,7 +2,7 @@ use std::{
     cell::{RefCell, RefMut},
     hash::Hash,
     os::{
-        fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, BorrowedFd, FromRawFd as _, RawFd},
         unix::net::UnixStream,
     },
     path::PathBuf,
@@ -383,7 +383,6 @@ pub(crate) struct WaylandClientState {
     keymap_state: Option<xkb::State>,
     compose_state: Option<xkb::compose::State>,
     drag: DragState,
-    native_drag_source: Option<NativeDragSource>,
     external_drag: Option<ExternalDrag>,
     click: ClickState,
     repeat: KeyRepeat,
@@ -508,17 +507,10 @@ where
     }
 }
 
-/// Which of the three `wl_data_source` flavours an event belongs to. Used as the
-/// dispatch userdata so the handler can route without comparing object ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DataSourceKind {
     Clipboard,
-    /// Upstream's outbound file drag, promoted automatically from an internal
-    /// drag via `AnyDrag::external_payload_source`. Platform picks the icon.
     Drag,
-    /// Our `Window::start_native_drag`, which lets the caller supply a rendered
-    /// drag image (see `NativeDragSource`). Elane's file table uses this.
-    NativeDrag,
 }
 
 pub(crate) struct ExternalDrag {
@@ -537,26 +529,6 @@ fn file_uri_list(paths: &FileDragPaths) -> String {
             list.push_str("\r\n");
             list
         })
-}
-
-/// Tracks an outgoing native drag operation initiated by the application.
-pub(crate) struct NativeDragSource {
-    /// File paths being dragged, encoded as `text/uri-list`.
-    uri_list: Vec<u8>,
-    /// The `wl_data_source` backing this drag.
-    data_source: wl_data_source::WlDataSource,
-    /// Callback invoked when the drag finishes or is cancelled.
-    callback: Option<Box<dyn FnOnce(gpui::NativeDragResult) + Send>>,
-    /// Icon surface + buffer shown during the drag (must stay alive).
-    _icon: Option<DragIcon>,
-}
-
-/// Wayland objects for the drag icon that must outlive the drag operation.
-struct DragIcon {
-    _surface: wl_surface::WlSurface,
-    _buffer: wl_buffer::WlBuffer,
-    _width: i32,
-    _height: i32,
 }
 
 pub struct ClickState {
@@ -782,95 +754,6 @@ impl WaylandClientStatePtr {
             return;
         };
         update_ime_cursor_rectangle(&text_input, &mut state.last_ime_cursor_rectangle, bounds);
-    }
-
-    pub fn start_native_drag(
-        &self,
-        surface: &wl_surface::WlSurface,
-        paths: Vec<PathBuf>,
-        icon: Option<gpui::NativeDragIcon>,
-        mode: gpui::NativeDragMode,
-        callback: Box<dyn FnOnce(gpui::NativeDragResult) + Send>,
-    ) -> anyhow::Result<()> {
-        let client = self.get_client();
-        let mut state = client.borrow_mut();
-
-        let data_device_manager = state
-            .globals
-            .data_device_manager
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("wl_data_device_manager not available"))?;
-        let data_device = state
-            .data_device
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("wl_data_device not available"))?;
-
-        // Build the text/uri-list payload.
-        let uri_list: Vec<u8> = paths
-            .iter()
-            .filter_map(|path| {
-                let absolute = if path.is_absolute() {
-                    path.to_owned()
-                } else {
-                    std::env::current_dir().ok()?.join(path)
-                };
-                http_client::Url::from_file_path(absolute).ok()
-            })
-            .fold(String::new(), |mut acc, url| {
-                acc.push_str(url.as_str());
-                acc.push_str("\r\n");
-                acc
-            })
-            .into_bytes();
-
-        if uri_list.is_empty() {
-            anyhow::bail!("no valid file paths to drag");
-        }
-
-        // Create the data source and offer the file list MIME type.
-        let data_source = data_device_manager
-            .create_data_source(&state.globals.qh, DataSourceKind::NativeDrag);
-        data_source.offer(FILE_LIST_MIME_TYPE.to_string());
-
-        // Set the supported DnD action.
-        let dnd_action = match mode {
-            gpui::NativeDragMode::Copy => DndAction::Copy,
-            gpui::NativeDragMode::Move => DndAction::Move,
-        };
-        data_source.set_actions(dnd_action);
-
-        // Use the last pointer serial — Wayland requires the serial from the
-        // button press that initiated the drag gesture.
-        let serial = state.serial_tracker.get(SerialKind::MousePress);
-
-        // Create the drag icon.
-        let icon = create_drag_icon(&state.globals, icon.as_ref());
-        let icon_surface_ref = icon.as_ref().map(|i| &i._surface);
-
-        // Start the drag — this assigns the icon role to the surface.
-        data_device.start_drag(
-            Some(&data_source),
-            surface,
-            icon_surface_ref,
-            serial.as_raw(),
-        );
-
-        // Now that the icon role is assigned, attach the buffer and commit.
-        if let Some(ref drag_icon) = icon {
-            drag_icon._surface.attach(Some(&drag_icon._buffer), 0, 0);
-            drag_icon._surface.damage(0, 0, drag_icon._width, drag_icon._height);
-            drag_icon._surface.commit();
-        }
-
-        // Store the drag source state so the Dispatch handler can complete it.
-        state.native_drag_source = Some(NativeDragSource {
-            uri_list,
-            data_source,
-            callback: Some(callback),
-            _icon: icon,
-        });
-
-        Ok(())
     }
 
     pub fn handle_keyboard_layout_change(&self) {
@@ -1205,7 +1088,6 @@ impl WaylandConnection {
                 position: Point::default(),
                 uri_read_generation: 0,
             },
-            native_drag_source: None,
             external_drag: None,
             click: ClickState {
                 last_click: Instant::now(),
@@ -2495,87 +2377,6 @@ fn linux_button_to_gpui(button: u32) -> Option<MouseButton> {
     })
 }
 
-/// Create a Wayland drag icon surface from pre-rendered ARGB8888 pixel data.
-/// Returns `None` if the surface cannot be created (non-fatal).
-fn create_drag_icon(
-    globals: &Globals,
-    icon_info: Option<&gpui::NativeDragIcon>,
-) -> Option<DragIcon> {
-    let icon_info = icon_info?;
-
-    let width = icon_info.width;
-    let height = icon_info.height;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let stride = width * 4; // ARGB32 bytes per row
-    let buf_size = (stride * height) as usize;
-
-    // Create anonymous shared memory.
-    let name = std::ffi::CString::new("gpui-drag-icon").ok()?;
-    let raw_fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
-    if raw_fd < 0 {
-        return None;
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    if unsafe { libc::ftruncate(fd.as_raw_fd(), buf_size as libc::off_t) } < 0 {
-        return None;
-    }
-
-    // Map and copy pre-rendered pixels.
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            buf_size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd.as_raw_fd(),
-            0,
-        )
-    };
-    if ptr == libc::MAP_FAILED {
-        return None;
-    }
-
-    {
-        let dest =
-            unsafe { std::slice::from_raw_parts_mut(ptr as *mut u32, (width * height) as usize) };
-        let copy_len = dest.len().min(icon_info.pixels.len());
-        dest[..copy_len].copy_from_slice(&icon_info.pixels[..copy_len]);
-    }
-    unsafe {
-        libc::munmap(ptr, buf_size);
-    }
-
-    // Create Wayland shm pool, buffer, and surface.
-    let pool = globals.shm.create_pool(
-        unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) },
-        buf_size as i32,
-        &globals.qh,
-        (),
-    );
-    let buffer = pool.create_buffer(
-        0,
-        width as i32,
-        height as i32,
-        stride as i32,
-        wayland_client::protocol::wl_shm::Format::Argb8888,
-        &globals.qh,
-        (),
-    );
-    pool.destroy();
-
-    let surface = globals.compositor.create_surface(&globals.qh, ());
-
-    Some(DragIcon {
-        _surface: surface,
-        _buffer: buffer,
-        _width: width as i32,
-        _height: height as i32,
-    })
-}
-
-
 impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
     fn event(
         this: &mut Self,
@@ -3274,33 +3075,6 @@ impl Dispatch<wl_data_source::WlDataSource, DataSourceKind> for WaylandClientSta
                 drop(state);
                 external_drag.window.handle_input(input);
             }
-            (DataSourceKind::NativeDrag, wl_data_source::Event::Send { mime_type, fd }) => {
-                if mime_type == FILE_LIST_MIME_TYPE
-                    && let Some(source) = &state.native_drag_source
-                {
-                    let bytes = source.uri_list.clone();
-                    state.clipboard.send_bytes(fd, bytes);
-                }
-            }
-            (DataSourceKind::NativeDrag, wl_data_source::Event::Cancelled) => {
-                if let Some(mut source) = state.native_drag_source.take() {
-                    if let Some(callback) = source.callback.take() {
-                        callback(gpui::NativeDragResult::Cancel);
-                    }
-                    source.data_source.destroy();
-                }
-            }
-            (DataSourceKind::NativeDrag, wl_data_source::Event::DndFinished) => {
-                if let Some(mut source) = state.native_drag_source.take() {
-                    if let Some(callback) = source.callback.take() {
-                        callback(gpui::NativeDragResult::Dropped);
-                    }
-                    source.data_source.destroy();
-                }
-            }
-            // The physical drop happened; wait for DndFinished or Cancelled
-            // before invoking the callback.
-            (DataSourceKind::NativeDrag, wl_data_source::Event::DndDropPerformed) => {}
             _ => {}
         }
     }
