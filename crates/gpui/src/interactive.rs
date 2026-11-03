@@ -552,6 +552,13 @@ pub enum ScrollSource {
     /// A pan of a finger on a touchscreen, recognized by GPUI, including the
     /// momentum GPUI synthesizes after the finger lifts.
     Touch,
+    /// Scrolling the platform keeps reporting after a pointer gesture ended,
+    /// to let the content coast to a stop (macOS: an `NSEvent` whose
+    /// `momentumPhase` is set — after a trackpad swipe, or from a mouse whose
+    /// driver scrolls smoothly). Containers scroll with it like with
+    /// [`ScrollSource::Pointer`]; a consumer that turns scrolling into
+    /// discrete steps (zoom) wants to leave it out, because nobody moved.
+    Momentum,
 }
 
 impl Sealed for ScrollEvent {}

@@ -309,7 +309,11 @@ pub(crate) unsafe fn platform_input_from_native(
                     delta,
                     touch_phase: phase,
                     modifiers: read_modifiers(native_event),
-                    source: ScrollSource::Pointer,
+                    source: if native_event.momentumPhase() == NSEventPhase::NSEventPhaseNone {
+                        ScrollSource::Pointer
+                    } else {
+                        ScrollSource::Momentum
+                    },
                 })
             }),
             NSEventType::NSLeftMouseDragged
