@@ -2019,6 +2019,15 @@ impl PlatformWindow for X11Window {
             .unwrap_or_default()
     }
 
+    fn dmabuf_render_node(&self) -> Option<gpui::DmabufDevice> {
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.dmabuf_render_node())
+    }
+
     fn play_system_bell(&self) {
         // Volume 0% means don't increase or decrease from system volume
         let _ = self.0.xcb.bell(0);

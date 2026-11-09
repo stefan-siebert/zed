@@ -23,6 +23,19 @@ pub struct DmabufFormat {
     pub modifier: u64,
 }
 
+/// The DRM render node a renderer draws on (`/dev/dri/renderD<minor>`), as
+/// Vulkan's `VK_EXT_physical_device_drm` reports it. A video producer in
+/// another process decodes on this node, so the DMABufs it exports carry a
+/// layout this renderer can import — on a machine with two GPUs a frame
+/// from the other one would not import.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DmabufDevice {
+    /// The device's major number (DRM: 226).
+    pub render_major: u32,
+    /// The render node's minor number (128 and up).
+    pub render_minor: u32,
+}
+
 /// One memory plane of a [`DmabufFrame`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DmabufPlane {

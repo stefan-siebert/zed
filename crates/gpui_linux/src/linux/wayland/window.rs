@@ -2397,6 +2397,13 @@ impl PlatformWindow for WaylandWindow {
             .unwrap_or_default()
     }
 
+    fn dmabuf_render_node(&self) -> Option<gpui::DmabufDevice> {
+        self.borrow()
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.dmabuf_render_node())
+    }
+
     fn play_system_bell(&self) {
         let state = self.borrow();
         let surface = if state.surface_state.toplevel().is_some() {

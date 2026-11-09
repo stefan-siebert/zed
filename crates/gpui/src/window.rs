@@ -5507,6 +5507,16 @@ impl Window {
         self.platform_window.supported_dmabuf_formats()
     }
 
+    /// The DRM render node this window's renderer draws on — the node a
+    /// video producer in another process should decode on, so that its
+    /// frames import here (hybrid graphics: the other GPU's layouts do
+    /// not). `None` when zero-copy presentation is unsupported or the
+    /// driver does not say.
+    #[cfg(target_os = "linux")]
+    pub fn dmabuf_render_node(&self) -> Option<crate::DmabufDevice> {
+        self.platform_window.dmabuf_render_node()
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

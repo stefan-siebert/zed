@@ -1428,6 +1428,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         Vec::new()
     }
 
+    /// The DRM render node this window's renderer draws on, when it can
+    /// import DMABuf video frames and the driver reports one. `None`
+    /// otherwise.
+    #[cfg(target_os = "linux")]
+    fn dmabuf_render_node(&self) -> Option<crate::DmabufDevice> {
+        None
+    }
+
     /// Whether this window's renderer can import and present shared-D3D11-
     /// texture video frames zero-copy (DirectX renderer opening NT shared
     /// handles). Default: unsupported.

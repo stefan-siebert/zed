@@ -653,6 +653,49 @@ impl WgpuContext {
         }
     }
 
+    /// The DRM render node (major, minor) of this device, from
+    /// `VK_EXT_physical_device_drm`: what a video producer in another
+    /// process opens, so its exports are laid out for this GPU. `None`
+    /// without DMABuf import, or when the driver lacks the extension or
+    /// has no render node.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    pub fn dmabuf_render_node(&self) -> Option<(u32, u32)> {
+        use wgpu::hal::api::Vulkan;
+
+        if !self.supports_dmabuf_import() {
+            return None;
+        }
+        // SAFETY: read-only physical-device queries.
+        unsafe {
+            let hal_device = self.device.as_hal::<Vulkan>()?;
+            let instance = hal_device.shared_instance().raw_instance();
+            let physical_device = hal_device.raw_physical_device();
+            // The property struct may only be chained when the device
+            // offers the extension (it need not be enabled).
+            let offered = instance
+                .enumerate_device_extension_properties(physical_device)
+                .ok()?
+                .iter()
+                .any(|extension| {
+                    extension.extension_name_as_c_str() == Ok(ash::ext::physical_device_drm::NAME)
+                });
+            if !offered {
+                log::debug!("VK_EXT_physical_device_drm not offered; render node unknown");
+                return None;
+            }
+            let mut drm = ash::vk::PhysicalDeviceDrmPropertiesEXT::default();
+            let mut properties = ash::vk::PhysicalDeviceProperties2::default().push_next(&mut drm);
+            instance.get_physical_device_properties2(physical_device, &mut properties);
+            if drm.has_render == ash::vk::FALSE {
+                return None;
+            }
+            Some((
+                u32::try_from(drm.render_major).ok()?,
+                u32::try_from(drm.render_minor).ok()?,
+            ))
+        }
+    }
+
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {

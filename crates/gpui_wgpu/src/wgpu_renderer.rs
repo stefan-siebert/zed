@@ -237,6 +237,10 @@ struct WgpuRendererCore {
     /// handed to video producers.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     dmabuf_formats: Vec<(u32, u64)>,
+    /// The DRM render node of the device (major, minor), when the driver
+    /// reports it — where a foreign video producer should decode.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    dmabuf_render_node: Option<(u32, u32)>,
     /// Compiled custom-shader pipelines. They belong to this core's device, so
     /// a recovered renderer recompiles them from `WgpuRenderer::custom_shaders`.
     custom_shader_pipelines: FxHashMap<CustomShaderId, wgpu::RenderPipeline>,
@@ -1391,6 +1395,8 @@ impl WgpuRendererCore {
             dmabuf_import: context.supports_dmabuf_import(),
             #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
             dmabuf_formats: context.supported_dmabuf_formats(),
+            #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+            dmabuf_render_node: context.dmabuf_render_node(),
             custom_shader_pipelines: FxHashMap::default(),
         }
     }
@@ -2593,6 +2599,19 @@ impl WgpuRenderer {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The DRM render node this renderer draws on, when it imports DMABufs
+    /// and the driver reports the node.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    pub fn dmabuf_render_node(&self) -> Option<gpui::DmabufDevice> {
+        self.core()
+            .filter(|core| core.dmabuf_import && !core.dmabuf_formats.is_empty())
+            .and_then(|core| core.dmabuf_render_node)
+            .map(|(render_major, render_minor)| gpui::DmabufDevice {
+                render_major,
+                render_minor,
+            })
     }
 
     /// Register a custom fragment shader. Returns a handle for use with
