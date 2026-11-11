@@ -19,7 +19,8 @@ use windows::Win32::{
 use windows::core::{Owned, PCWSTR};
 
 use gpui::{
-    ClipboardEntry, ClipboardItem, ClipboardString, ExternalPaths, Image, ImageFormat, hash,
+    ClipboardEntry, ClipboardItem, ClipboardString, ExternalPaths, FileOperation, Image,
+    ImageFormat, hash,
 };
 
 const DRAGDROP_GET_FILES_COUNT: u32 = 0xFFFFFFFF;
@@ -36,6 +37,15 @@ static CLIPBOARD_PNG_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("PNG")));
 static CLIPBOARD_JPG_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("JFIF")));
+/// `CFSTR_PREFERREDDROPEFFECT`: beside `CF_HDROP`, whether a paste moves
+/// the files (Explorer's Cut) or copies them.
+static CLIPBOARD_PREFERRED_DROP_EFFECT: LazyLock<u32> =
+    LazyLock::new(|| register_clipboard_format(windows::core::w!("Preferred DropEffect")));
+
+/// `DROPEFFECT_MOVE`.
+const DROP_EFFECT_MOVE: u32 = 2;
+/// `DROPEFFECT_COPY | DROPEFFECT_LINK`, what Explorer's Copy writes.
+const DROP_EFFECT_COPY_OR_LINK: u32 = 1 | 4;
 
 static IMAGE_FORMATS_MAP: LazyLock<FxHashMap<u32, ImageFormat>> = LazyLock::new(|| {
     let mut map = FxHashMap::default();
@@ -79,6 +89,7 @@ pub(crate) fn write_to_clipboard(item: ClipboardItem) {
                 ClipboardEntry::String(string) => write_string(string)?,
                 ClipboardEntry::Image(image) => write_image(image)?,
                 ClipboardEntry::ExternalPaths(paths) => write_files(paths)?,
+                ClipboardEntry::FileOperation(operation) => write_file_operation(*operation)?,
             }
         }
         Ok(())
@@ -118,6 +129,10 @@ pub(crate) fn read_from_clipboard() -> Option<ClipboardItem> {
                 have_files = true;
             }
         }
+    }
+
+    if have_files && let Some(operation) = read_file_operation() {
+        entries.push(ClipboardEntry::FileOperation(operation));
     }
 
     if entries.is_empty() {
@@ -263,6 +278,25 @@ fn write_files(paths: &ExternalPaths) -> Result<()> {
         std::mem::forget(global);
     }
     Ok(())
+}
+
+fn write_file_operation(operation: FileOperation) -> Result<()> {
+    let effect = match operation {
+        FileOperation::Copy => DROP_EFFECT_COPY_OR_LINK,
+        FileOperation::Move => DROP_EFFECT_MOVE,
+    };
+    set_clipboard_bytes(&[effect], *CLIPBOARD_PREFERRED_DROP_EFFECT)
+}
+
+/// Explorer's Cut sets `DROPEFFECT_MOVE`; any other effect is a copy.
+fn read_file_operation() -> Option<FileOperation> {
+    let locked = get_clipboard_data(*CLIPBOARD_PREFERRED_DROP_EFFECT)?;
+    let effect = u32::from_ne_bytes(locked.as_bytes().get(..4)?.try_into().ok()?);
+    Some(if effect & DROP_EFFECT_MOVE != 0 {
+        FileOperation::Move
+    } else {
+        FileOperation::Copy
+    })
 }
 
 fn read_string() -> Option<ClipboardEntry> {

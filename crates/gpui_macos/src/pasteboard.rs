@@ -169,7 +169,17 @@ impl Pasteboard {
                 [ClipboardEntry::Image(image)] => {
                     self.write_image(image);
                 }
-                [ClipboardEntry::ExternalPaths(paths)] => {
+                [ClipboardEntry::ExternalPaths(paths)]
+                | [
+                    ClipboardEntry::ExternalPaths(paths),
+                    ClipboardEntry::FileOperation(_),
+                ]
+                | [
+                    ClipboardEntry::FileOperation(_),
+                    ClipboardEntry::ExternalPaths(paths),
+                ] => {
+                    // macOS has no cut marker: the Finder cannot cut, and
+                    // moves on Option-Cmd-V. The files go on as files.
                     self.write_files(paths);
                 }
                 _ => {

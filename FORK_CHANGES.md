@@ -206,6 +206,7 @@ whose `SetData` keeps what the Shell's drag-image manager stores, and
 | Commit | Change |
 |---|---|
 | `992c6958` | Write `ExternalPaths` as native file references on all platforms (macOS/Windows/Wayland/X11) |
+| (this commit) | `ClipboardEntry::FileOperation` (`Copy`/`Move`): a file manager's cut or copy beside `ExternalPaths`. Windows writes and reads it as "Preferred DropEffect"; macOS writes the files and leaves it out (the Finder cannot cut). Linux (`x-special/gnome-copied-files`) not yet. The one exhaustive match outside the platform crates, `agent_ui`'s `message_editor`, ignores it. |
 
 ## 6. Windows keyboard handling
 

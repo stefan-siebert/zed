@@ -3184,6 +3184,22 @@ pub enum ClipboardEntry {
     Image(Image),
     /// A file entry
     ExternalPaths(crate::ExternalPaths),
+    /// What a paste of this item's [`ClipboardEntry::ExternalPaths`] should
+    /// do with the files — a file manager's cut or copy. Windows carries it
+    /// as "Preferred DropEffect" beside `CF_HDROP`, GNOME as the first line
+    /// of `x-special/gnome-copied-files`; macOS has no such marker (the
+    /// Finder cannot cut), so it is not written there and never read.
+    FileOperation(FileOperation),
+}
+
+/// A cut or a copy of files on the clipboard; see
+/// [`ClipboardEntry::FileOperation`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum FileOperation {
+    /// Pasting copies the files.
+    Copy,
+    /// Pasting moves the files: they were cut.
+    Move,
 }
 
 impl ClipboardItem {
