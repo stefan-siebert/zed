@@ -404,7 +404,7 @@ impl MetalRenderer {
         // Replaces the region it covers rather than blending onto it: the
         // shader has already composited the (blurred) destination itself, so
         // source-over would count the sharp original twice.
-        let backdrop_blur_pipeline_state = build_path_sprite_pipeline_state(
+        let backdrop_blur_pipeline_state = build_backdrop_composite_pipeline_state(
             &device,
             &library,
             "backdrop_blur",
@@ -1886,6 +1886,53 @@ fn build_blit_pipeline_state(
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
     color_attachment.set_blending_enabled(false);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
+/// The backdrop composite: the fragment's first output *replaces* the target
+/// where the second output's alpha (the shape's coverage) is 1, and mixes with
+/// it only along the anti-aliased edge — dual-source blending,
+/// `out = src0 + dst * (1 - src1.a)`.
+///
+/// Source-over (`One, OneMinusSourceAlpha`), which this replaced, took the
+/// blurred copy's own alpha for coverage. In a window the desktop shows
+/// through, that alpha is below 1, so the sharp original stayed partly in
+/// and — worse — the alphas added up: a sidebar at 0.951 came out at 0.998,
+/// a dark box over the desktop with a hard edge where the blur ended
+/// (Elane's Places sidebar scroll edge, 2026-11-13).
+fn build_backdrop_composite_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function(vertex_fn_name, None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(pixel_format);
+    color_attachment.set_blending_enabled(true);
+    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment
+        .set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSource1Alpha);
+    color_attachment
+        .set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSource1Alpha);
 
     device
         .new_render_pipeline_state(&descriptor)

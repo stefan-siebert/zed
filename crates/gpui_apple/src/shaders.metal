@@ -1426,7 +1426,15 @@ vertex BackdropBlurVertexOutput backdrop_blur_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
-fragment float4 backdrop_blur_fragment(
+// The composite's two outputs for dual-source blending
+// (`build_backdrop_composite_pipeline_state`): `color` replaces the target,
+// `coverage.a` says how much of it.
+struct BackdropBlurFragmentOutput {
+  float4 color [[color(0), index(0)]];
+  float4 coverage [[color(0), index(1)]];
+};
+
+fragment BackdropBlurFragmentOutput backdrop_blur_fragment(
     BackdropBlurFragmentInput input [[stage_in]],
     constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
     constant Size_DevicePixels *viewport_size
@@ -1445,12 +1453,17 @@ fragment float4 backdrop_blur_fragment(
 
   // Everything here is premultiplied: `backdrop` because it was sampled from
   // the premultiplied target, `tint` because we premultiply it now. This pass
-  // REPLACES the region it covers (pipeline blend is One / 1-SrcAlpha), so the
-  // sharp original underneath is not double-counted.
+  // REPLACES the region it covers — alpha included, so a window the desktop
+  // shows through stays as see-through as it was — and mixes with the target
+  // only by the shape's coverage along its edge (dual-source blend,
+  // out = color + dst * (1 - coverage)).
   float4 tint = float4(input.tint.rgb * input.tint.a, input.tint.a);
   float4 color = tint + backdrop * (1.0 - tint.a);
 
   float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
   float coverage = saturate(0.5 - distance);
-  return color * coverage;
+  BackdropBlurFragmentOutput output;
+  output.color = color * coverage;
+  output.coverage = float4(coverage);
+  return output;
 }

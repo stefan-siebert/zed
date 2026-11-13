@@ -108,9 +108,17 @@ Two things this required that are easy to regress:
    rendering into, so the drawable must be readable. Apple defaults this the
    other way because it forgoes display-path optimisations.
 2. **The composite pipeline must not blend** in the usual source-over sense
-   (`build_path_sprite_pipeline_state`, i.e. `One` / `1-SrcAlpha`). The fragment
-   shader has already composited the blurred destination itself; source-over
-   would count the sharp original twice.
+   (`One` / `1-SrcAlpha`). The fragment shader has already composited the
+   blurred destination itself; source-over would count the sharp original
+   twice. It used `build_path_sprite_pipeline_state`, which *is* source-over
+   with the blurred copy's alpha as coverage — harmless over an opaque
+   window, but where the desktop shows through (Liquid Glass) the alphas
+   added up: a surface at 0.951 came out at 0.998, a dark box with a hard
+   edge where the blur ended (2026-11-13, Elane's sidebar scroll edge). Since
+   then `build_backdrop_composite_pipeline_state` blends dual-source:
+   `out = src0 + dst * (1 - src1.a)`, the shader's second output carrying
+   only the shape's coverage — inside the shape the blurred copy replaces
+   the target, alpha included; only the anti-aliased edge mixes.
 
 Mechanically it mirrors the existing path rendering: the batch loop ends the
 encoder, runs the blur into scratch textures, and reopens the encoder on the
