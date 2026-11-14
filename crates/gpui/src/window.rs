@@ -7783,12 +7783,17 @@ impl Window {
 
     /// Record text that was painted at the given bounds.
     /// Used by the MCP inspector to associate text content with UI elements.
+    ///
+    /// Only the part the current content mask lets through counts: a column
+    /// scrolled out of a table is still painted, and its text, seen by
+    /// nobody, used to land in whatever element held its origin.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn record_painted_text(&mut self, bounds: Bounds<Pixels>, text: &str) {
-        if !text.is_empty() {
+        let visible = bounds.intersect(&self.content_mask().bounds);
+        if !text.is_empty() && !visible.is_empty() {
             self.next_frame
                 .inspector_painted_texts
-                .push((bounds, text.to_string()));
+                .push((visible, text.to_string()));
         }
     }
 
@@ -7899,7 +7904,11 @@ impl Window {
 
     /// Returns inspector element information for all elements in the rendered frame
     /// that have inspector hitboxes registered. Text content is associated with the
-    /// smallest containing inspector element (no duplication across parent/child).
+    /// smallest inspector element whose visible part contains it (no duplication
+    /// across parent/child). Visible, not laid out: an element scrolled out of its
+    /// clip still has bounds, and whatever another element paints there is not its
+    /// text — a tab's close button scrolled out of a strip was named after the
+    /// folder painted where it would have been.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_elements(&self) -> Vec<InspectorElementInfo> {
         let painted_texts = &self.rendered_frame.inspector_painted_texts;
@@ -7925,9 +7934,10 @@ impl Window {
             let mut best_area = f64::MAX;
 
             for (hitbox, _) in &inspector_hitboxes {
-                if hitbox.bounds.contains(&text_bounds.origin) {
-                    let area = f64::from(f32::from(hitbox.bounds.size.width))
-                        * f64::from(f32::from(hitbox.bounds.size.height));
+                let visible = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+                if visible.contains(&text_bounds.origin) {
+                    let area = f64::from(f32::from(visible.size.width))
+                        * f64::from(f32::from(visible.size.height));
                     if area < best_area {
                         best_area = area;
                         best_hitbox_id = Some(hitbox.id);
@@ -10837,6 +10847,77 @@ mod inspector_tests {
                 assert!(!window.inspector_elements().is_empty(), "elements reported");
             })
             .expect("requested window");
+        }
+    }
+
+    /// Text belongs to the element that shows it. The close button sits
+    /// inside a 50 px strip at x 60 — clipped away entirely — and the label
+    /// paints "right" on that very spot; the text is the label's. The strip
+    /// also paints "hidden" beyond its own edge, which nobody sees.
+    #[gpui::test]
+    fn clipped_away_elements_get_no_text(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| ClippedTestView);
+        cx.update(|cx| cx.request_inspector_ids());
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let elements = window.inspector_elements();
+            let text_of = |id: &str| {
+                elements
+                    .iter()
+                    .find(|element| element.global_id.ends_with(id))
+                    .map(|element| element.text_content.clone())
+            };
+            assert_eq!(text_of("clipped-close"), Some(Vec::new()));
+            assert_eq!(text_of("visible-label"), Some(vec!["right".to_string()]));
+            assert_eq!(
+                text_of("strip"),
+                Some(Vec::new()),
+                "hidden text is no one's"
+            );
+        })
+        .expect("window");
+    }
+
+    struct ClippedTestView;
+
+    impl Render for ClippedTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .size(px(200.))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .w(px(50.))
+                        .h(px(20.))
+                        .overflow_hidden()
+                        .id("strip")
+                        .on_click(|_, _, _| {})
+                        // Painted past the strip's edge: nobody sees it.
+                        .child(div().absolute().left(px(65.)).top_0().child("hidden"))
+                        .child(
+                            div()
+                                .id("clipped-close")
+                                .absolute()
+                                .left(px(60.))
+                                .top_0()
+                                .size(px(20.))
+                                .on_click(|_, _, _| {}),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("visible-label")
+                        .absolute()
+                        .left(px(60.))
+                        .top_0()
+                        .w(px(100.))
+                        .h(px(40.))
+                        .on_click(|_, _, _| {})
+                        .child("right"),
+                )
         }
     }
 
