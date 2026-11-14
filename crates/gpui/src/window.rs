@@ -1328,6 +1328,10 @@ pub struct Window {
         SubscriberSet<(), Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
+    /// Custom shaders whose instances carry a clock: shader → (index into
+    /// `params`, the instant it counts seconds from). See
+    /// [`Window::register_custom_shader_clock`].
+    shader_clocks: FxHashMap<CustomShaderId, (usize, Instant)>,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
@@ -2262,6 +2266,7 @@ impl Window {
             visibility_observers: SubscriberSet::new(),
             hovered,
             needs_present,
+            shader_clocks: FxHashMap::default(),
             input_rate_tracker,
             #[cfg(feature = "profiler")]
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
@@ -4937,6 +4942,65 @@ impl Window {
     ) -> Option<CustomShaderId> {
         self.platform_window
             .register_custom_shader(wgsl_fragment, label)
+    }
+
+    /// Declare that `params[slot]` of every instance of `shader` is a clock:
+    /// seconds since `epoch`, as `epoch.elapsed().as_secs_f32()` gives them.
+    ///
+    /// Only a shader with a clock is advanced by [`Self::request_shader_frame`].
+    /// Registering again replaces the clock.
+    pub fn register_custom_shader_clock(
+        &mut self,
+        shader: CustomShaderId,
+        slot: usize,
+        epoch: Instant,
+    ) {
+        if slot < 16 {
+            self.shader_clocks.insert(shader, (slot, epoch));
+        } else {
+            log::warn!("custom shader clock slot {slot} is outside params[0..16]; ignored");
+        }
+    }
+
+    /// Present the last drawn frame again on the next frame, with the clock of
+    /// every custom shader registered through
+    /// [`Self::register_custom_shader_clock`] advanced to now — without
+    /// rebuilding, laying out or painting a single element.
+    ///
+    /// For decorative motion that is a pure function of time (falling snow,
+    /// twinkling, a drifting field). Everything else in the window stays as it
+    /// was last drawn; if the window is invalidated meanwhile, the normal draw
+    /// runs instead and its paint sets the clocks itself. Check
+    /// [`App::reduce_motion`] first, as for [`Self::request_animation_frame`].
+    pub fn request_shader_frame(&self) {
+        self.on_next_frame(|window, _| window.advance_shader_clocks());
+    }
+
+    /// Set every registered clock in the last drawn scene to now and mark the
+    /// scene for presentation.
+    ///
+    /// Call it from an [`Self::on_next_frame`] callback: those run before the
+    /// frame decides between drawing and presenting, so a window that is not
+    /// dirty then takes the present-only path. A continuous effect drives
+    /// itself with a callback that calls this and schedules itself again for
+    /// as long as the effect runs — no view code runs on such a frame, so
+    /// nothing else would ask for the next one.
+    pub fn advance_shader_clocks(&mut self) {
+        if self.shader_clocks.is_empty() {
+            return;
+        }
+        let mut advanced = false;
+        for instance in &mut self.rendered_frame.scene.custom_shaders {
+            if let Some((slot, epoch)) = self.shader_clocks.get(&instance.shader_id)
+                && let Some(param) = instance.params.get_mut(*slot)
+            {
+                *param = epoch.elapsed().as_secs_f32();
+                advanced = true;
+            }
+        }
+        if advanced {
+            self.needs_present.set(true);
+        }
     }
 
     /// Paint a custom shader instance into the scene.
@@ -9206,6 +9270,124 @@ mod tests {
             test_window.frame_wake_count() > baseline || callback_ran.get(),
             "a frame request with pending next-frame callbacks must either run them or re-arm the frame source"
         );
+    }
+
+    /// The point of shader clocks: a frame asked for with
+    /// `request_shader_frame` presents the last scene with the clock advanced
+    /// and renders no view. Elane's measurement (plan
+    /// 2026-11-14-seasonal-snow §3.2): 1.04 % of a core at 30 fps against
+    /// 15.1 % for full frames.
+    #[gpui::test]
+    fn test_shader_frame_presents_without_rendering(cx: &mut TestAppContext) {
+        use crate::{CustomShaderId, CustomShaderInstance};
+        use std::time::Instant;
+
+        struct Counted(Rc<Cell<usize>>);
+        impl Render for Counted {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.set(self.0.get() + 1);
+                div()
+            }
+        }
+
+        let renders = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let renders = renders.clone();
+            move |_, _| Counted(renders)
+        });
+        let test_window = cx.test_window(window.into());
+        test_window.simulate_active_status_change(true);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        let rendered_before = renders.get();
+        assert!(rendered_before >= 1, "the first frame renders the view");
+
+        let shader = CustomShaderId(3);
+        window
+            .update(cx, |_, window, _| {
+                window.rendered_frame.scene.custom_shaders = vec![CustomShaderInstance {
+                    order: 0,
+                    shader_id: shader,
+                    bounds: Bounds::default(),
+                    content_mask: ContentMask {
+                        bounds: Bounds::default(),
+                    },
+                    params: [0.0; 16],
+                    _pad: [0.0; 2],
+                }];
+                let epoch = Instant::now() - Duration::from_secs(5);
+                window.register_custom_shader_clock(shader, 0, epoch);
+                window.request_shader_frame();
+            })
+            .unwrap();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+
+        window
+            .update(cx, |_, window, _| {
+                let clock = window.rendered_frame.scene.custom_shaders[0].params[0];
+                assert!(clock >= 5.0, "the clock advanced: {clock}");
+                assert!(
+                    !window.needs_present.get(),
+                    "the advanced scene was presented"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            renders.get(),
+            rendered_before,
+            "a shader frame renders no view"
+        );
+    }
+
+    /// `advance_shader_clocks` sets the registered slot of every instance of a
+    /// clocked shader to the seconds since its epoch, leaves every other
+    /// parameter and every unclocked shader alone, and marks the scene for
+    /// presentation; without a clocked instance it presents nothing.
+    #[gpui::test]
+    fn test_advance_shader_clocks_patches_only_the_registered_slot(cx: &mut TestAppContext) {
+        use crate::{CustomShaderId, CustomShaderInstance};
+        use std::time::Instant;
+
+        fn instance(shader: u32) -> CustomShaderInstance {
+            CustomShaderInstance {
+                order: 0,
+                shader_id: CustomShaderId(shader),
+                bounds: Bounds::default(),
+                content_mask: ContentMask {
+                    bounds: Bounds::default(),
+                },
+                params: [0.5; 16],
+                _pad: [0.0; 2],
+            }
+        }
+
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, window, _| {
+                window.rendered_frame.scene.custom_shaders = vec![instance(7), instance(8)];
+                window.needs_present.set(false);
+
+                // No clock registered: nothing to advance, nothing to present.
+                window.advance_shader_clocks();
+                assert!(!window.needs_present.get());
+
+                let epoch = Instant::now() - Duration::from_secs(2);
+                window.register_custom_shader_clock(CustomShaderId(7), 3, epoch);
+                // Out of range: refused, and must not panic later.
+                window.register_custom_shader_clock(CustomShaderId(8), 16, epoch);
+                window.advance_shader_clocks();
+
+                assert!(window.needs_present.get());
+                let clocked = &window.rendered_frame.scene.custom_shaders[0];
+                assert!(clocked.params[3] >= 2.0, "clock: {}", clocked.params[3]);
+                for (index, param) in clocked.params.iter().enumerate() {
+                    if index != 3 {
+                        assert_eq!(*param, 0.5, "param {index} must stay untouched");
+                    }
+                }
+                let unclocked = &window.rendered_frame.scene.custom_shaders[1];
+                assert_eq!(unclocked.params, [0.5; 16]);
+            })
+            .unwrap();
     }
 
     #[gpui::test]
