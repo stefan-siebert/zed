@@ -1012,6 +1012,17 @@ pub(crate) struct TooltipRequest {
 /// the ids cloned out and the hash on top of the stack, without walking the
 /// path — the ids of every ancestor, string names byte by byte — for each
 /// element on every frame.
+/// A text the MCP inspector saw painted, with the path hash of every element
+/// it was painted inside: only those can own it. An element painted later
+/// over the same spot — a dialog over a file list — covers the text; it
+/// does not show it.
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub(crate) struct PaintedText {
+    bounds: Bounds<Pixels>,
+    text: String,
+    painted_inside: SmallVec<[u64; 32]>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ElementIdStack {
     ids: SmallVec<[ElementId; 32]>,
@@ -1093,7 +1104,7 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     #[cfg(any(feature = "inspector", debug_assertions))]
-    pub(crate) inspector_painted_texts: Vec<(Bounds<Pixels>, String)>,
+    pub(crate) inspector_painted_texts: Vec<PaintedText>,
     pub(crate) tab_stops: TabStopMap,
 }
 
@@ -7791,9 +7802,14 @@ impl Window {
     pub fn record_painted_text(&mut self, bounds: Bounds<Pixels>, text: &str) {
         let visible = bounds.intersect(&self.content_mask().bounds);
         if !text.is_empty() && !visible.is_empty() {
-            self.next_frame
-                .inspector_painted_texts
-                .push((visible, text.to_string()));
+            let mut painted_inside = SmallVec::new();
+            painted_inside.push(crate::EMPTY_PATH_HASH);
+            painted_inside.extend_from_slice(&self.element_id_stack.hashes);
+            self.next_frame.inspector_painted_texts.push(PaintedText {
+                bounds: visible,
+                text: text.to_string(),
+                painted_inside,
+            });
         }
     }
 
@@ -7908,7 +7924,9 @@ impl Window {
     /// across parent/child). Visible, not laid out: an element scrolled out of its
     /// clip still has bounds, and whatever another element paints there is not its
     /// text — a tab's close button scrolled out of a strip was named after the
-    /// folder painted where it would have been.
+    /// folder painted where it would have been. And only an element the text
+    /// was painted inside: a dialog's title over a file list is not named
+    /// after the row's size and date painted under it.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_elements(&self) -> Vec<InspectorElementInfo> {
         let painted_texts = &self.rendered_frame.inspector_painted_texts;
@@ -7929,13 +7947,16 @@ impl Window {
         // For each painted text, find the smallest containing inspector hitbox
         let mut text_assignments: FxHashMap<HitboxId, Vec<String>> = FxHashMap::default();
 
-        for (text_bounds, text) in painted_texts {
+        for painted in painted_texts {
             let mut best_hitbox_id: Option<HitboxId> = None;
             let mut best_area = f64::MAX;
 
-            for (hitbox, _) in &inspector_hitboxes {
+            for (hitbox, inspector_id) in &inspector_hitboxes {
                 let visible = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
-                if visible.contains(&text_bounds.origin) {
+                let painted_inside = painted
+                    .painted_inside
+                    .contains(&inspector_id.path.global_id.accesskit_node_id().0);
+                if painted_inside && visible.contains(&painted.bounds.origin) {
                     let area = f64::from(f32::from(visible.size.width))
                         * f64::from(f32::from(visible.size.height));
                     if area < best_area {
@@ -7946,7 +7967,10 @@ impl Window {
             }
 
             if let Some(id) = best_hitbox_id {
-                text_assignments.entry(id).or_default().push(text.clone());
+                text_assignments
+                    .entry(id)
+                    .or_default()
+                    .push(painted.text.clone());
             }
         }
 
@@ -10876,6 +10900,69 @@ mod inspector_tests {
             );
         })
         .expect("window");
+    }
+
+    /// Text belongs to an element it was painted inside. A card painted
+    /// later over a row covers the row's text; its title, as small as the
+    /// spot and on top, is not named after it.
+    #[gpui::test]
+    fn covering_elements_get_no_text_painted_under_them(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| CoveredTestView);
+        cx.update(|cx| cx.request_inspector_ids());
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let elements = window.inspector_elements();
+            let text_of = |id: &str| {
+                elements
+                    .iter()
+                    .find(|element| element.global_id.ends_with(id))
+                    .map(|element| element.text_content.clone())
+            };
+            assert_eq!(text_of("row"), Some(vec!["under".to_string()]));
+            assert_eq!(text_of("card-title"), Some(vec!["title".to_string()]));
+        })
+        .expect("window");
+    }
+
+    struct CoveredTestView;
+
+    impl Render for CoveredTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .size(px(200.))
+                .child(
+                    div()
+                        .id("row")
+                        .absolute()
+                        .left_0()
+                        .top(px(20.))
+                        .w(px(200.))
+                        .h(px(40.))
+                        .on_click(|_, _, _| {})
+                        .child("under"),
+                )
+                .child(
+                    div()
+                        .id("card")
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .size(px(150.))
+                        .on_click(|_, _, _| {})
+                        .child(
+                            div()
+                                .id("card-title")
+                                .absolute()
+                                .left_0()
+                                .top(px(20.))
+                                .w(px(100.))
+                                .h(px(40.))
+                                .on_click(|_, _, _| {})
+                                .child(div().mt(px(20.)).child("title")),
+                        ),
+                )
+        }
     }
 
     struct ClippedTestView;
