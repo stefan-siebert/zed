@@ -8,15 +8,16 @@ use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, CustomShaderId, CustomShaderInstance, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, ExternalDragPayload,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlowParams, GlyphId, GpuSpecs,
-    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, CustomShaderId,
+    CustomShaderInstance, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId,
+    DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, ExternalDragPayload,
+    FileDropEvent, FontId, Global, GlobalElementId, GlowParams, GlyphId, GpuSpecs, Hsla,
+    InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    MonochromeSprite, MouseButton, MouseDownEvent, MouseEvent, MouseMoveEvent, MouseUpEvent, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
@@ -6696,7 +6697,12 @@ impl Window {
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         let mut hit_test = self.rendered_frame.hit_test(self.mouse_position());
-        if self.hovers_suspended {
+        // Suspension hides hover styling, nothing more. A press or a release is
+        // aimed at what is under the pointer, and clicks and drags start only on
+        // a hovered hitbox — suspended, they would be dropped. The next paint
+        // suspends again.
+        let is_button_event = event.is::<MouseDownEvent>() || event.is::<MouseUpEvent>();
+        if self.hovers_suspended && !is_button_event {
             hit_test.hover_hitbox_count = 0;
         }
         self.mouse_hit_test = hit_test;
@@ -11416,6 +11422,106 @@ mod tests {
             cursor_observer.test_platform().cursor_style(),
             CursorStyle::IBeam
         );
+    }
+
+    /// Suspended hovers hide hover styling and nothing else: a press and a
+    /// release still reach what is under the pointer. An app suspends hovers
+    /// for a moment after every resize, and a click or drag in that moment
+    /// used to be dropped, because both start only on a hovered hitbox.
+    #[gpui::test]
+    fn test_suspended_hovers_still_take_clicks_and_drags(cx: &mut TestAppContext) {
+        struct Row {
+            clicks: Rc<Cell<usize>>,
+        }
+
+        impl Render for Row {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                window.suspend_hovers(true);
+                let clicks = self.clicks.clone();
+                div().size_full().child(
+                    div()
+                        .id("row")
+                        .w(px(100.))
+                        .h(px(20.))
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+                        .on_drag((), |_, _, _, cx| cx.new(|_| Empty)),
+                )
+            }
+        }
+
+        let clicks = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let clicks = clicks.clone();
+            move |_, _| Row { clicks }
+        });
+        let on_row = point(px(10.), px(10.));
+        let dragged_to = point(px(60.), px(10.));
+
+        let update_result = cx.update_window(window.into(), |_, window, cx| {
+            window.hovered.set(true);
+            window.active.set(true);
+            window.draw(cx).clear(cx);
+            for event in [
+                MouseMoveEvent {
+                    position: on_row,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                MouseDownEvent {
+                    position: on_row,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                MouseUpEvent {
+                    position: on_row,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+            ] {
+                window.dispatch_event(event, cx);
+                window.draw(cx).clear(cx);
+            }
+            assert_eq!(clicks.get(), 1, "the click under suspended hovers was lost");
+
+            for event in [
+                MouseDownEvent {
+                    position: on_row,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                MouseMoveEvent {
+                    position: dragged_to,
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+            ] {
+                window.dispatch_event(event, cx);
+                window.draw(cx).clear(cx);
+            }
+            assert!(
+                cx.has_active_drag(),
+                "the drag under suspended hovers did not start"
+            );
+            window.dispatch_event(
+                MouseUpEvent {
+                    position: dragged_to,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+        assert!(update_result.is_ok(), "update failed: {update_result:?}");
     }
 }
 
