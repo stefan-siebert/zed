@@ -224,6 +224,7 @@ whose `SetData` keeps what the Shell's drag-image manager stores, and
 |---|---|
 | `6d13b23a` | Keep unshifted key + shift modifier in `get_keystroke_key` |
 | `01ff34dd` | Drop shift modifier on keybinding side after shifted-key substitution |
+| (2026-11-17) | **`KeyBinding::load_with_mapper(…, keyboard_mapper, os)`** — `load` without an `App`. Upstream's `load` took the mapper until this merge and takes `cx` since, which always means the platform's own mapper and its own OS. Elane binds its registry through `DummyKeyboardMapper` on purpose (its keystrokes are key labels, the two rows above) and builds keymaps in tests that have no `App`. Same body as `load`, the two inputs handed over. |
 
 ## 6a. Auto-repeat reaches keystroke interceptors
 

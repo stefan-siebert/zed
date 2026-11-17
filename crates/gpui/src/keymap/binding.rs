@@ -67,6 +67,34 @@ impl KeyBinding {
         )
     }
 
+    /// Fork: [`Self::load`] without an [`App`](crate::App) — the keyboard
+    /// mapper and the host OS are handed over instead of read from `cx`.
+    ///
+    /// Upstream's `load` took the mapper until 2026-11 and takes `cx` since,
+    /// which always means the platform's own mapper. An embedder that binds
+    /// through [`DummyKeyboardMapper`] on purpose (Elane: its keystrokes are
+    /// written as key labels, see FORK_CHANGES §6) and builds keymaps where
+    /// there is no `App` (tests) keeps both this way.
+    pub fn load_with_mapper(
+        keystrokes: &str,
+        action: Box<dyn Action>,
+        context_predicate: Option<Rc<KeyBindingContextPredicate>>,
+        use_key_equivalents: bool,
+        action_input: Option<SharedString>,
+        keyboard_mapper: &dyn PlatformKeyboardMapper,
+        os: crate::OperatingSystem,
+    ) -> std::result::Result<Self, InvalidKeystrokeError> {
+        Self::load_internal(
+            keystrokes,
+            action,
+            context_predicate,
+            use_key_equivalents,
+            action_input,
+            keyboard_mapper,
+            |source| Keystroke::parse_with_os(source, os),
+        )
+    }
+
     fn load_internal<'a>(
         keystrokes: &'a str,
         action: Box<dyn Action>,
