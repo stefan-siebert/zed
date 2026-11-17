@@ -479,11 +479,11 @@ fn shortcut(
 ) -> Option<(Retained<NSString>, UIKeyModifierFlags)> {
     static DEFAULT_CONTEXT: OnceLock<Vec<KeyContext>> = OnceLock::new();
     let default_context = DEFAULT_CONTEXT.get_or_init(|| {
-        let mut workspace_context = KeyContext::new_with_defaults();
+        let mut workspace_context = KeyContext::new_with_defaults(gpui::OperatingSystem::Ios);
         workspace_context.add("Workspace");
-        let mut pane_context = KeyContext::new_with_defaults();
+        let mut pane_context = KeyContext::new_with_defaults(gpui::OperatingSystem::Ios);
         pane_context.add("Pane");
-        let mut editor_context = KeyContext::new_with_defaults();
+        let mut editor_context = KeyContext::new_with_defaults(gpui::OperatingSystem::Ios);
         editor_context.add("Editor");
         pane_context.extend(&editor_context);
         workspace_context.extend(&pane_context);

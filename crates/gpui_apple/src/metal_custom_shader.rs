@@ -19,6 +19,12 @@
 use anyhow::{Context as _, Result};
 use collections::HashMap;
 use gpui::{CustomShaderId, CustomShaderInstance};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_foundation::NSString;
+use objc2_metal::{
+    MTLBlendFactor, MTLBlendOperation, MTLCompileOptions, MTLDevice, MTLLibrary, MTLPixelFormat,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+};
 
 /// Buffer slots the custom-shader pipeline expects. `Vertices` is deliberately
 /// left unbound — the vertex shader derives its unit quad from `[[vertex_id]]`
@@ -58,7 +64,7 @@ pub(crate) struct CustomShaderGlobals {
 
 /// Cache of compiled custom-shader pipelines.
 pub(crate) struct CustomShaderResources {
-    pipelines: HashMap<CustomShaderId, metal::RenderPipelineState>,
+    pipelines: HashMap<CustomShaderId, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
     next_id: u32,
 }
 
@@ -70,8 +76,11 @@ impl CustomShaderResources {
         }
     }
 
-    pub(crate) fn pipeline(&self, id: CustomShaderId) -> Option<&metal::RenderPipelineState> {
-        self.pipelines.get(&id)
+    pub(crate) fn pipeline(
+        &self,
+        id: CustomShaderId,
+    ) -> Option<&ProtocolObject<dyn MTLRenderPipelineState>> {
+        self.pipelines.get(&id).map(|pipeline| &**pipeline)
     }
 
     /// Compile the caller's WGSL fragment and cache the pipeline it produces.
@@ -80,8 +89,8 @@ impl CustomShaderResources {
     /// `fn custom_effect(position: vec2<f32>, bounds: Bounds, content_mask: Bounds, params: array<f32, 16>) -> vec4<f32>`.
     pub(crate) fn register(
         &mut self,
-        device: &metal::Device,
-        pixel_format: metal::MTLPixelFormat,
+        device: &ProtocolObject<dyn MTLDevice>,
+        pixel_format: MTLPixelFormat,
         wgsl_fragment: &str,
         label: &str,
     ) -> Result<CustomShaderId> {
@@ -90,10 +99,13 @@ impl CustomShaderResources {
             .with_context(|| format!("translating custom shader '{label}' to MSL"))?;
 
         let library = device
-            .new_library_with_source(&translated.source, &metal::CompileOptions::new())
-            .map_err(|message| {
+            .newLibraryWithSource_options_error(
+                &NSString::from_str(&translated.source),
+                Some(&MTLCompileOptions::new()),
+            )
+            .map_err(|error| {
                 anyhow::anyhow!(
-                    "compiling MSL for custom shader '{label}': {message}\n--- MSL ---\n{}",
+                    "compiling MSL for custom shader '{label}': {error}\n--- MSL ---\n{}",
                     translated.source
                 )
             })?;
@@ -326,40 +338,38 @@ fn wgsl_to_msl(wgsl_source: &str) -> Result<TranslatedShader> {
 /// This is *not* what `build_pipeline_state` in `metal_renderer.rs` sets up:
 /// gpui's own primitives hand the blender straight (unpremultiplied) alpha.
 fn build_custom_shader_pipeline_state(
-    device: &metal::Device,
-    library: &metal::LibraryRef,
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
     label: &str,
     vertex_fn_name: &str,
     fragment_fn_name: &str,
-    pixel_format: metal::MTLPixelFormat,
-) -> Result<metal::RenderPipelineState> {
+    pixel_format: MTLPixelFormat,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
     let vertex_fn = library
-        .get_function(vertex_fn_name, None)
-        .map_err(|message| anyhow::anyhow!("locating vertex function: {message}"))?;
+        .newFunctionWithName(&NSString::from_str(vertex_fn_name))
+        .with_context(|| format!("locating vertex function {vertex_fn_name}"))?;
     let fragment_fn = library
-        .get_function(fragment_fn_name, None)
-        .map_err(|message| anyhow::anyhow!("locating fragment function: {message}"))?;
+        .newFunctionWithName(&NSString::from_str(fragment_fn_name))
+        .with_context(|| format!("locating fragment function {fragment_fn_name}"))?;
 
-    let descriptor = metal::RenderPipelineDescriptor::new();
-    descriptor.set_label(label);
-    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
-    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
-    let color_attachment = descriptor
-        .color_attachments()
-        .object_at(0)
-        .context("render pipeline descriptor has no color attachment 0")?;
-    color_attachment.set_pixel_format(pixel_format);
-    color_attachment.set_blending_enabled(true);
-    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
-    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
-    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
-    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
-    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+    let descriptor = MTLRenderPipelineDescriptor::new();
+    descriptor.setLabel(Some(&NSString::from_str(label)));
+    descriptor.setVertexFunction(Some(vertex_fn.as_ref()));
+    descriptor.setFragmentFunction(Some(fragment_fn.as_ref()));
+    // SAFETY: Index zero is within the pipeline's color attachment array.
+    let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    color_attachment.setPixelFormat(pixel_format);
+    color_attachment.setBlendingEnabled(true);
+    color_attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    color_attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    color_attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
+    color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+    color_attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    color_attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
 
     device
-        .new_render_pipeline_state(&descriptor)
-        .map_err(|message| anyhow::anyhow!("creating custom shader pipeline state: {message}"))
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .map_err(|error| anyhow::anyhow!("creating custom shader pipeline state: {error}"))
 }
 
 /// The instance layout the WGSL template declares has to stay byte-identical to
@@ -402,7 +412,8 @@ fn custom_effect(position: vec2<f32>, bounds: Bounds, content_mask: Bounds, para
     fn custom_shader_paints_its_quad_and_honours_the_content_mask() {
         let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(
             crate::metal_renderer::InstanceBufferPool::default(),
-        )));
+        )))
+        .expect("creating headless Metal renderer");
         let shader_id = renderer
             .register_custom_shader(TEST_SHADER, "test-custom-shader")
             .expect("registering the test shader failed");
@@ -457,7 +468,8 @@ fn custom_effect(position: vec2<f32>, bounds: Bounds, content_mask: Bounds, para
     fn a_batch_starting_past_instance_zero_reads_its_own_instance() {
         let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(
             crate::metal_renderer::InstanceBufferPool::default(),
-        )));
+        )))
+        .expect("creating headless Metal renderer");
         let first = renderer
             .register_custom_shader(TEST_SHADER, "first")
             .expect("registering the first shader failed");
@@ -511,7 +523,8 @@ fn custom_effect(position: vec2<f32>, bounds: Bounds, content_mask: Bounds, para
     fn invalid_wgsl_is_reported_rather_than_compiled() {
         let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(
             crate::metal_renderer::InstanceBufferPool::default(),
-        )));
+        )))
+        .expect("creating headless Metal renderer");
         assert!(
             renderer
                 .register_custom_shader("fn custom_effect() -> {", "broken")

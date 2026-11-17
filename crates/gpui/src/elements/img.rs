@@ -3,21 +3,17 @@ use crate::{
     Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId,
     InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
     RenderImage, Resource, SharedString, SharedUri, StyleRefinement, Styled, Task, Window,
-    decode_static_image, decode_static_image_from_decoder, px,
+    decode_gif_image, decode_static_image, decode_webp_image, px,
 };
 use anyhow::Result;
 
 use futures::Future;
 use gpui_util::ResultExt;
-use image::{
-    AnimationDecoder, ImageError, ImageFormat, Rgba,
-    codecs::{gif::GifDecoder, webp::WebPDecoder},
-};
+use image::{ImageError, ImageFormat};
 use scheduler::Instant;
-use smallvec::SmallVec;
 use std::{
     fs,
-    io::{self, Cursor},
+    io::{self},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     str::FromStr,
@@ -702,77 +698,19 @@ impl Asset for ImageAssetLoader {
 
             if let Ok(format) = image::guess_format(&bytes) {
                 let data = match format {
-                    ImageFormat::Gif => {
-                        let decoder = GifDecoder::new(Cursor::new(&bytes))?;
-                        let mut frames = SmallVec::new();
-
-                        for frame in decoder.into_frames() {
-                            match frame {
-                                Ok(mut frame) => {
-                                    // Convert from RGBA to BGRA.
-                                    for pixel in frame.buffer_mut().chunks_exact_mut(4) {
-                                        pixel.swap(0, 2);
-                                    }
-                                    frames.push(frame);
-                                }
-                                Err(err) => {
-                                    log::debug!(
-                                        "Skipping GIF frame in {source:?} due to decode error: {err}"
-                                    );
-                                }
-                            }
-                        }
-
-                        if frames.is_empty() {
-                            return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-                                "GIF could not be decoded: all frames failed ({source:?})"
-                            ))));
-                        }
-
-                        frames
-                    }
-                    ImageFormat::WebP => {
-                        let mut decoder = WebPDecoder::new(Cursor::new(&bytes))?;
-
-                        if decoder.has_animation() {
-                            let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
-                            let mut frames = SmallVec::new();
-
-                            for frame in decoder.into_frames() {
-                                match frame {
-                                    Ok(mut frame) => {
-                                        // Convert from RGBA to BGRA.
-                                        for pixel in frame.buffer_mut().chunks_exact_mut(4) {
-                                            pixel.swap(0, 2);
-                                        }
-                                        frames.push(frame);
-                                    }
-                                    Err(err) => {
-                                        log::debug!(
-                                            "Skipping WebP frame in {source:?} due to decode error: {err}"
-                                        );
-                                    }
-                                }
-                            }
-
-                            if frames.is_empty() {
-                                return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-                                    "WebP could not be decoded: all frames failed ({source:?})"
-                                ))));
-                            }
-
-                            let loop_count = parse_webp_loop_count(&bytes);
-                            return Ok(Arc::new(
-                                RenderImage::new(frames).with_loop_count(loop_count),
-                            ));
-                        } else {
-                            decode_static_image_from_decoder(decoder)?
-                        }
-                    }
+                    ImageFormat::Gif => decode_gif_image(&bytes)?,
+                    ImageFormat::WebP => decode_webp_image(&bytes)?,
                     _ => decode_static_image(&bytes, format)?,
                 };
 
-                Ok(Arc::new(RenderImage::new(data)))
+                // Fork: an animated WebP plays as often as its ANIM chunk says.
+                let animated_webp = format == ImageFormat::WebP && data.len() > 1;
+                let image = RenderImage::new(data);
+                Ok(Arc::new(if animated_webp {
+                    image.with_loop_count(parse_webp_loop_count(&bytes))
+                } else {
+                    image
+                }))
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)
@@ -864,6 +802,7 @@ mod tests {
     use super::*;
     use crate::{ParentElement as _, TestAppContext, canvas, div, point, px, size};
     use image::{Frame, ImageBuffer, Rgba};
+    use smallvec::SmallVec;
 
     const TEST_IMG_ID: &str = "test-img";
 
