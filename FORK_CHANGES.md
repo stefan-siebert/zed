@@ -272,6 +272,7 @@ the binding swallowed the wildcard.
 |---|---|
 | `df5caa72` | Add `suspend_hovers` to suppress hover states during drag/resize |
 | `9436b547` | Suspend hovers during window resize |
+| `e76d60ed41` | Suspension hides hover styling and nothing more: a press or release hit-tests normally in `dispatch_mouse_event`, moves and paints stay suspended. Clicks and drags start only on a hovered hitbox, so before this a press during the suspension was dropped — Elane suspends for 200 ms after every resize, and on macOS its ui-test drag scenarios (viewport set, then drag at once) failed every time. Test: `test_suspended_hovers_still_take_clicks_and_drags` |
 | `5b2df28f` | (Wayland) defer surface state changes to `draw()` to fix 1px resize "wabbern" on Mutter |
 | `71ea59bb` / `0f4c1776` | (Wayland/Windows) suppress "window not found" error on window close |
 | `047e0ae0` | (Wayland) complete the above for the path GPUI itself closes a window on. `Window::remove_window` takes the entry out of `App`'s map and drops the `Rc<WaylandWindow>`; `WaylandWindow::drop` destroys the surface immediately but defers `close()` — which is what set `Callbacks::closed` — to a spawned task, leaving the window in the client's surface map in between. The pending `wl_callback` (one is essentially always in flight) is still routed there, and `frame()` was never guarded, so its `thermal_state` / `present` / `complete_frame` updates produced three `window not found` backtraces per close. Sets `closed` synchronously in `Drop` and guards `frame()` plus the remaining dispatch sites via `take_callback`. X11 already does this with its `destroyed` flag |
@@ -490,10 +491,29 @@ CARGO_TARGET_DIR=target/xcheck-macos cargo check -p gpui_apple -p gpui_macos --t
 # the error names (iOS: an empty shaders.metallib too) and run again.
 ```
 
-That checks types, not Metal shader source, linking or behaviour. Still to do on the Mac: `cargo test -p gpui_apple
---features runtime_shaders`, backdrop blur across a window resize with Metal validation on, an inspector
-screenshot with a blur on screen, the Dock's Quit against an `on_should_quit` handler, copying files to the
-Finder, a `Blurred` window, the keypad's arithmetic keys.
+That checks types, not Metal shader source, linking or behaviour.
+
+Verified 2026-11-17 on the Mac (macOS 27.2, debug build, Elane at `merge/upstream-2026-11-17`):
+
+- `cargo test -p gpui_apple --features runtime_shaders`: 19 passed, the custom-shader pixel tests among them;
+  `cargo test -p gpui --lib`: 443 passed (with the test below).
+- Backdrop blur: command palette, then path dropdown with its flyout (two glass surfaces overlapping), each
+  across four window resizes, with `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` — no validation message, the
+  blur stays right (peekaboo captures of the real composite).
+- Inspector screenshot with the palette's blur on screen (`render_offscreen`): blur in the image, no error.
+- Title glow, marquee (`shader_frames` counting) and the seasonal snow drawn.
+- Quit Apple Event (what the Dock's Quit sends) during a 4 GB copy: refused (`-128`), Elane asks "1 Vorgang
+  läuft noch"; without an operation it quits.
+- Files copied in Elane: the pasteboard carries `public.file-url` and the path as text; Finder's "Paste
+  Item" pasted the file.
+- `Blurred` main window: the blurred desktop shows through the panels.
+- Keypad as real `CGEvent`s (key codes 0x43/0x45/0x4e/0x4b/0x41, numeric-pad flag): `*` inverts the
+  selection, `+`/`-` open select/deselect by pattern, `/` and `.` reach no binding and type nothing.
+- Editor with 10 MiB in one line (800×600): 1.3 GB opened; Alt+Z 1.4 GB, 220 frames in 3 s with Elane in
+  front (30 fps while it was in the background — upstream's inactive-window frame limit).
+
+Found only by running, not by the line audit: `suspend_hovers` swallowed presses (§8, `e76d60ed41`).
+Not checked here: trackpad momentum (needs a hand on the trackpad).
 
 Known and older than this merge: `gpui_windows` `keyboard::tests::test_keyboard_mapper` fails — it asserts
 upstream's shift handling, which `01ff34dde3` changed on purpose. The test module did not compile before this
