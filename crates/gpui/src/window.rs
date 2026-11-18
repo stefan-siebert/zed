@@ -5158,6 +5158,28 @@ impl Window {
         blur_radius: Pixels,
         tint: Hsla,
     ) {
+        self.paint_backdrop_lens(bounds, corner_radii, blur_radius, tint, px(0.), px(0.));
+    }
+
+    /// [`Self::paint_backdrop_blur`] with a lens along the edge: within
+    /// `bevel` of the shape's edge the backdrop is displaced inwards by up to
+    /// `refraction`, so the rim shows what lies further inside, bent — what
+    /// makes a surface read as a body of glass rather than as a frosted pane.
+    /// The three colour channels bend slightly differently, as in real glass.
+    ///
+    /// A small `blur_radius` keeps the backdrop recognisable, which is what
+    /// the lens needs to be seen at all. All lengths are in logical pixels.
+    /// Where [`Self::supports_backdrop_blur`] is `false` there is no lens
+    /// either.
+    pub fn paint_backdrop_lens(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur_radius: Pixels,
+        tint: Hsla,
+        refraction: Pixels,
+        bevel: Pixels,
+    ) {
         self.invalidator.debug_assert_paint();
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
@@ -5168,6 +5190,8 @@ impl Window {
             content_mask: content_mask.scale(scale_factor),
             corner_radii: corner_radii.scale(scale_factor),
             tint,
+            refraction: f32::from(refraction * scale_factor),
+            bevel: f32::from(bevel * scale_factor),
         });
     }
 

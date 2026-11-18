@@ -1445,11 +1445,34 @@ fragment BackdropBlurFragmentOutput backdrop_blur_fragment(
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear,
                                     address::clamp_to_edge);
 
-  // The blurred copy covers the whole viewport, so sample it by screen
-  // position rather than by a per-quad UV.
-  float2 uv = input.position.xy /
-              float2((float)viewport_size->width, (float)viewport_size->height);
-  float4 backdrop = blurred.sample(texture_sampler, uv);
+  float2 viewport =
+      float2((float)viewport_size->width, (float)viewport_size->height);
+  float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
+  float4 backdrop;
+  if (blur.refraction > 0.0 && blur.bevel > 0.0) {
+    // The lens: within `bevel` of the edge the sample point moves inwards
+    // along the edge's normal, most right at the edge. The normal is the
+    // gradient of the shape's distance field.
+    float2 at = input.position.xy;
+    float2 normal = normalize(
+        float2(quad_sdf(at + float2(0.5, 0.0), blur.bounds, blur.corner_radii) -
+                   quad_sdf(at - float2(0.5, 0.0), blur.bounds, blur.corner_radii),
+               quad_sdf(at + float2(0.0, 0.5), blur.bounds, blur.corner_radii) -
+                   quad_sdf(at - float2(0.0, 0.5), blur.bounds, blur.corner_radii)) +
+        float2(1e-6));
+    float edge = saturate(1.0 + distance / blur.bevel);
+    float lens = edge * edge * (3.0 - 2.0 * edge);
+    float2 shift = normal * blur.refraction * lens;
+    // Dispersion: red bends least, blue most.
+    float4 centre = blurred.sample(texture_sampler, (at - shift) / viewport);
+    float red = blurred.sample(texture_sampler, (at - shift * 0.9) / viewport).r;
+    float blue = blurred.sample(texture_sampler, (at - shift * 1.1) / viewport).b;
+    backdrop = float4(red, centre.g, blue, centre.a);
+  } else {
+    // The blurred copy covers the whole viewport, so sample it by screen
+    // position rather than by a per-quad UV.
+    backdrop = blurred.sample(texture_sampler, input.position.xy / viewport);
+  }
 
   // Everything here is premultiplied: `backdrop` because it was sampled from
   // the premultiplied target, `tint` because we premultiply it now. This pass
@@ -1460,7 +1483,6 @@ fragment BackdropBlurFragmentOutput backdrop_blur_fragment(
   float4 tint = float4(input.tint.rgb * input.tint.a, input.tint.a);
   float4 color = tint + backdrop * (1.0 - tint.a);
 
-  float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
   float coverage = saturate(0.5 - distance);
   BackdropBlurFragmentOutput output;
   output.color = color * coverage;

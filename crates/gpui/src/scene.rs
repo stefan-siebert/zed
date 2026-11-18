@@ -679,6 +679,13 @@ pub struct BackdropBlur {
     /// Tint composited *over* the blurred backdrop, in the usual
     /// source-over sense: `tint.a == 1` hides the backdrop entirely.
     pub tint: Hsla,
+    /// How far, in device pixels, the backdrop is displaced right at the
+    /// edge — the lens of a glass surface. Along the edge the shape shows
+    /// what lies further inside it, bent; `0` is a flat pane.
+    pub refraction: f32,
+    /// Width in device pixels of the band along the edge over which the
+    /// displacement falls to nothing.
+    pub bevel: f32,
 }
 
 impl From<BackdropBlur> for Primitive {
