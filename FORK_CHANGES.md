@@ -2,7 +2,7 @@
 
 **Fork:** `stefan-siebert/zed`, branch `gpui-mcp-patches-v2`
 **Built from:** local checkout `../gpui-fork` (overrides the git dep via Cargo `[patch]` in Elane's `Cargo.toml`).
-**Baseline:** upstream Zed merged at commit `5adae449` (merge commit `77cfef62`, 2026-10-21; previous: `933d8d93` / `3f66c9e1`, 2026-09-25).
+**Baseline:** upstream Zed merged at commit `d2a4fb6d` = `gpui-pre 0.3.12` (merge commit `abdd6f00`, 2026-11-17; previous: `5adae449` / `77cfef62`, 2026-10-21).
 
 This file inventories the **custom commits on top of upstream**. Everything else on the branch is upstream PRs pulled in by merges.
 
@@ -64,7 +64,7 @@ Rules:
 
 ## Summary
 
-**84 custom commits**, net **+7,217 / −475 lines across 74 files** vs the upstream merge point (`5adae449`, measured 2026-10-21 after the merge commit and its follow-ups).
+**134 custom commits**, net **+10,424 / −580 lines across 97 files** (this file left out) vs the upstream merge point (`d2a4fb6d`, measured 2026-11-17 on the merge commit).
 
 Both figures come straight from the commands above; re-run them after every
 upstream merge, and move the baseline commit with them. Counting against
@@ -225,6 +225,7 @@ whose `SetData` keeps what the Shell's drag-image manager stores, and
 |---|---|
 | `6d13b23a` | Keep unshifted key + shift modifier in `get_keystroke_key` |
 | `01ff34dd` | Drop shift modifier on keybinding side after shifted-key substitution |
+| (2026-11-17) | **`KeyBinding::load_with_mapper(…, keyboard_mapper, os)`** — `load` without an `App`. Upstream's `load` took the mapper until this merge and takes `cx` since, which always means the platform's own mapper and its own OS. Elane binds its registry through `DummyKeyboardMapper` on purpose (its keystrokes are key labels, the two rows above) and builds keymaps in tests that have no `App`. Same body as `load`, the two inputs handed over. |
 
 ## 6a. Auto-repeat reaches keystroke interceptors
 
@@ -272,6 +273,7 @@ the binding swallowed the wildcard.
 |---|---|
 | `df5caa72` | Add `suspend_hovers` to suppress hover states during drag/resize |
 | `9436b547` | Suspend hovers during window resize |
+| `e76d60ed41` | Suspension hides hover styling and nothing more: a press or release hit-tests normally in `dispatch_mouse_event`, moves and paints stay suspended. Clicks and drags start only on a hovered hitbox, so before this a press during the suspension was dropped — Elane suspends for 200 ms after every resize, and on macOS its ui-test drag scenarios (viewport set, then drag at once) failed every time. Test: `test_suspended_hovers_still_take_clicks_and_drags` |
 | `5b2df28f` | (Wayland) defer surface state changes to `draw()` to fix 1px resize "wabbern" on Mutter |
 | `71ea59bb` / `0f4c1776` | (Wayland/Windows) suppress "window not found" error on window close |
 | `047e0ae0` | (Wayland) complete the above for the path GPUI itself closes a window on. `Window::remove_window` takes the entry out of `App`'s map and drops the `Rc<WaylandWindow>`; `WaylandWindow::drop` destroys the surface immediately but defers `close()` — which is what set `Callbacks::closed` — to a spawned task, leaving the window in the client's surface map in between. The pending `wl_callback` (one is essentially always in flight) is still routed there, and `frame()` was never guarded, so its `thermal_state` / `present` / `complete_frame` updates produced three `window not found` backtraces per close. Sets `closed` synchronously in `Drop` and guards `frame()` plus the remaining dispatch sites via `take_callback`. X11 already does this with its `destroyed` flag |
@@ -455,6 +457,69 @@ or `gpui_linux` — because the fork's own code there had not moved with upstrea
 Verified on Linux (Fedora, Wayland, `cage` headless): Elane's workspace clippy clean, 4646 tests pass, an H.264
 preview plays and the inspector's screenshot (`render_to_image`) works.
 
+## 16. What the 2026-11-17 upstream merge moved
+
+234 upstream commits (`5adae449a3..d2a4fb6ded`, the snapshot behind `gpui-pre 0.3.12`). Merge commit
+`abdd6f009c`; the full resolution list is in its message. The ones the next merge lands on:
+
+| Was | Is |
+|---|---|
+| `gpui_macos` on `cocoa` / `objc` (`id`, `nil`, `&mut Object`, `extern "C"`) | objc2 only (#65713–#65715, #65932, #65933): `*mut AnyObject`, `&AnyObject`, `extern "C-unwind"`, `ClassBuilder`. Every fork patch there was translated: `should_terminate` (returns `usize`), `write_files` (`NSArray::from_retained_slice`), the CGS blur declarations, `keypad_key_name` on the rewritten keystroke parser. `NSEventPhase::NSEventPhaseNone` is `NSEventPhase::None`. |
+| `gpui_apple` on the `metal` crate (`metal::Texture`, `set_*` methods) | `objc2_metal` (#65942): `Retained<ProtocolObject<dyn MTL…>>`, selector-named methods, `usize` indices. `metal_custom_shader.rs` and all fork code in `metal_renderer.rs` (backdrop blur, custom shaders) moved with it; the dependency on `metal` is gone, `naga` stays. |
+| Fork pipeline builders `.expect(…)`; `blur_backdrop` → `Option<&metal::Texture>` | Return `Result`, as upstream's builders do (`MetalRenderer::new*` is fallible); `blur_backdrop` → `Result<Option<Retained<…MTLTexture>>>`. |
+| `render_to_image` reads the drawable | Upstream renders into an offscreen texture (`render_offscreen`, #66344) because `CAMetalDisplayLink` owns the drawable. The fork ungates `render_offscreen` and `read_texture_to_image` with it. `setFramebufferOnly(false)` stays unconditional — backdrop blur still samples the drawable. |
+| Backdrop-blur scratch textures reallocated on every `update_path_intermediate_textures` | Only when the size changes: they share upstream's "size unchanged" early return. |
+| Upstream `BlurredView` (`NSVisualEffectView`) | Still not taken (§15); its class, field and three functions are removed from the objc2 file again. |
+| `cfg(target_os = "macos")` in `keystroke.rs`, widened by the fork to `any(macos, ios)` | Upstream asks at run time: `PlatformInfo` / `OperatingSystem` (`platform_info.rs`). The fork adds `OperatingSystem::is_apple()` / `PlatformInfo::is_apple()` and uses them where upstream asks for `Mac` alone, so an iPad keeps cmd as `secondary` and the Mac's glyphs. **Consumers change too:** `Modifiers::secondary(cx)` and `Modifiers::secondary_key(cx)` take `&App`; `Keystroke::parse` takes `&'static str` and rejects `secondary-` — dynamic input goes through `Keystroke::parse_with_os(source, os)`; `KeyContext::new_with_defaults(os)`. |
+| Fork: `font_ids_by_font: … Result<FontId, Arc<anyhow::Error>>` (`dbdbbc6b84`) | Upstream's `CachedFont::{Direct, Fallback, Missing(Arc<…>)}` (#65852) does that job; the fork's cache is gone. The weight/style-preserving fallback (`1e745ba1f3`) lives in `resolve_font_uncached`, and upstream's test `caches_resolved_font_fallbacks` asks for the styled fallback. |
+| `quit_observers` etc. as `SubscriberSet<(), …>` | `SingleSubscriberSet<…>` (no key, `insert` returns the `Subscription`). The fork's `should_quit_handlers` follows. |
+| GIF / WebP decoding inline in `img.rs` | `decode_gif_image` / `decode_webp_image` in `platform.rs`. The fork's WebP loop count (`parse_webp_loop_count`) is applied after decoding, for a WebP with more than one frame. |
+| DirectWrite `raster_bounds` of one glyph analysis | The union over the colour layers' analyses. The fork's glow padding dilates that union. `ShaderModule::EmojiRasterization` is gone upstream; the fork's `Surface` stays. |
+| Wayland `set_size_and_scale` sets the viewport destination | Upstream now ends it with `update_window(state)` (opaque region); the fork's deferred `pending_viewport_dest` is set first, on the same borrow. New upstream field `client_corner_radii`. |
+| Frame loop `.log_err()` | Upstream added `.with_context(…)` to each update; the fork's `.log_err_with_backtrace()` (§12c) follows it on all six. |
+
+Verified 2026-11-17 on Windows: `cargo test -p gpui --lib` 441 passed; `gpui_windows`, `gpui_platform` check clean.
+Linux (WSL): `cargo check -p gpui_linux -p gpui_wgpu -p gpui_platform --all-targets` clean — types only, nothing run.
+`gpui_apple` + `gpui_macos` (`aarch64-apple-darwin`, `runtime_shaders`) and `gpui_ios` (`aarch64-apple-ios`)
+type-check with `--tests` **from Windows** — new with this merge:
+
+```bash
+rustup target add aarch64-apple-darwin aarch64-apple-ios   # inside the fork (its own toolchain)
+CARGO_TARGET_DIR=target/xcheck-macos cargo check -p gpui_apple -p gpui_macos --tests \
+  --target aarch64-apple-darwin --features gpui_apple/runtime_shaders
+# gpui_apple's build.rs only runs on a macOS host: the first run fails on
+# include_str!(…/stitched_shaders.metal). Create that file empty in the OUT_DIR
+# the error names (iOS: an empty shaders.metallib too) and run again.
+```
+
+That checks types, not Metal shader source, linking or behaviour.
+
+Verified 2026-11-17 on the Mac (macOS 27.2, debug build, Elane at `merge/upstream-2026-11-17`):
+
+- `cargo test -p gpui_apple --features runtime_shaders`: 19 passed, the custom-shader pixel tests among them;
+  `cargo test -p gpui --lib`: 443 passed (with the test below).
+- Backdrop blur: command palette, then path dropdown with its flyout (two glass surfaces overlapping), each
+  across four window resizes, with `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` — no validation message, the
+  blur stays right (peekaboo captures of the real composite).
+- Inspector screenshot with the palette's blur on screen (`render_offscreen`): blur in the image, no error.
+- Title glow, marquee (`shader_frames` counting) and the seasonal snow drawn.
+- Quit Apple Event (what the Dock's Quit sends) during a 4 GB copy: refused (`-128`), Elane asks "1 Vorgang
+  läuft noch"; without an operation it quits.
+- Files copied in Elane: the pasteboard carries `public.file-url` and the path as text; Finder's "Paste
+  Item" pasted the file.
+- `Blurred` main window: the blurred desktop shows through the panels.
+- Keypad as real `CGEvent`s (key codes 0x43/0x45/0x4e/0x4b/0x41, numeric-pad flag): `*` inverts the
+  selection, `+`/`-` open select/deselect by pattern, `/` and `.` reach no binding and type nothing.
+- Editor with 10 MiB in one line (800×600): 1.3 GB opened; Alt+Z 1.4 GB, 220 frames in 3 s with Elane in
+  front (30 fps while it was in the background — upstream's inactive-window frame limit).
+
+Found only by running, not by the line audit: `suspend_hovers` swallowed presses (§8, `e76d60ed41`).
+Not checked here: trackpad momentum (needs a hand on the trackpad).
+
+Known and older than this merge: `gpui_windows` `keyboard::tests::test_keyboard_mapper` fails — it asserts
+upstream's shift handling, which `01ff34dde3` changed on purpose. The test module did not compile before this
+merge, so it never showed.
+
 ---
 
 
@@ -469,83 +534,106 @@ preview plays and the inspector's screenshot (`render_to_image`) works.
 
 ---
 
-## Full file-level diff stat (vs `5adae449`)
+## Full file-level diff stat (vs `d2a4fb6d`)
 ```
- ACCESSIBILITY_PLAN.md                            |  49 +++++
- Cargo.lock                                       |  66 +++++-
- Cargo.toml                                       |   1 +
- FORK_CHANGES.md                                  | 368 ++++++++++++++++++++++++++++++++
- crates/gpui/Cargo.toml                           |   4 +-
- crates/gpui/src/app.rs                           |  34 +++
- crates/gpui/src/assets.rs                        |  23 ++
- crates/gpui/src/d3d11_surface.rs                 |  64 ++++++
- crates/gpui/src/debug_overlay.rs                 |   4 +
- crates/gpui/src/dmabuf.rs                        | 135 ++++++++++++
- crates/gpui/src/element.rs                       |   2 +-
- crates/gpui/src/elements/div.rs                  |   8 +
- crates/gpui/src/elements/img.rs                  |  82 +++++++-
- crates/gpui/src/elements/surface.rs              |  48 ++++-
- crates/gpui/src/elements/text.rs                 | 149 ++++++++++++-
- crates/gpui/src/gpui.rs                          |   8 +
- crates/gpui/src/key_dispatch.rs                  |  52 +++++
- crates/gpui/src/platform.rs                      |  89 +++++++-
- crates/gpui/src/scene.rs                         | 163 +++++++++++++++
- crates/gpui/src/style.rs                         |  18 ++
- crates/gpui/src/styled.rs                        |  12 +-
- crates/gpui/src/taffy.rs                         | 155 ++++++++++++++
- crates/gpui/src/text_system.rs                   | 126 +++++++++--
- crates/gpui/src/text_system/glow_mask.rs         | 182 ++++++++++++++++
- crates/gpui/src/text_system/line.rs              | 120 ++++++++++-
- crates/gpui/src/window.rs                        | 602 ++++++++++++++++++++++++++++++++++++++++++++++++++---
- crates/gpui/src/window/a11y.rs                   |  18 +-
- crates/gpui_apple/Cargo.toml                     |   7 +
- crates/gpui_apple/build.rs                       |   4 +
- crates/gpui_apple/src/gpui_apple.rs              |   5 +
- crates/gpui_apple/src/metal_custom_shader.rs     | 522 ++++++++++++++++++++++++++++++++++++++++++++++
- crates/gpui_apple/src/metal_renderer.rs          | 552 +++++++++++++++++++++++++++++++++++++++++++++++-
- crates/gpui_apple/src/shaders.metal              | 179 +++++++++++++++-
- crates/gpui_apple/src/text_system.rs             |  27 ++-
- crates/gpui_linux/Cargo.toml                     |   1 +
- crates/gpui_linux/src/linux/platform.rs          |  47 ++++-
- crates/gpui_linux/src/linux/wayland.rs           |   2 +-
- crates/gpui_linux/src/linux/wayland/client.rs    | 231 +++++++++++++++++++-
- crates/gpui_linux/src/linux/wayland/clipboard.rs |  78 ++++++-
- crates/gpui_linux/src/linux/wayland/window.rs    | 233 ++++++++++++++++++---
- crates/gpui_linux/src/linux/x11/client.rs        |  42 +++-
- crates/gpui_linux/src/linux/x11/clipboard.rs     |  16 +-
- crates/gpui_linux/src/linux/x11/window.rs        |  30 ++-
- crates/gpui_macos/src/events.rs                  |  31 +++
- crates/gpui_macos/src/pasteboard.rs              |  39 +++-
- crates/gpui_macos/src/window.rs                  | 167 +++++----------
- crates/gpui_util/src/lib.rs                      |  18 +-
- crates/gpui_web/Cargo.toml                       |   5 +-
- crates/gpui_web/src/window.rs                    |  12 +-
- crates/gpui_wgpu/Cargo.toml                      |  10 +-
- crates/gpui_wgpu/src/cosmic_text_system.rs       |  78 ++++++-
- crates/gpui_wgpu/src/dmabuf_texture.rs           | 206 ++++++++++++++++++
- crates/gpui_wgpu/src/gpui_wgpu.rs                |   2 +
- crates/gpui_wgpu/src/shaders.wgsl                |  96 ++++++++-
- crates/gpui_wgpu/src/shaders_webgl.wgsl          |  82 +++-----
- crates/gpui_wgpu/src/wgpu_context.rs             | 181 ++++++++++++++++
- crates/gpui_wgpu/src/wgpu_renderer.rs            | 520 ++++++++++++++++++++++++++++++++++++++++++++-
- crates/gpui_windows/Cargo.toml                   |   1 +
- crates/gpui_windows/build.rs                     |   1 +
- crates/gpui_windows/src/clipboard.rs             |  37 +++-
- crates/gpui_windows/src/direct_write.rs          | 110 +++++++---
- crates/gpui_windows/src/directx_custom_shader.rs | 420 +++++++++++++++++++++++++++++++++++++
- crates/gpui_windows/src/directx_renderer.rs      | 270 ++++++++++++++++++++++--
- crates/gpui_windows/src/events.rs                | 120 ++++++++++-
- crates/gpui_windows/src/gpui_windows.rs          |   2 +
- crates/gpui_windows/src/keyboard.rs              |  71 +++----
- crates/gpui_windows/src/native_drag.rs           | 522 ++++++++++++++++++++++++++++++++++++++++++++++
- crates/gpui_windows/src/platform.rs              |   5 +-
- crates/gpui_windows/src/shaders.hlsl             |  44 ++++
- crates/gpui_windows/src/util.rs                  |  14 ++
- crates/gpui_windows/src/window.rs                |  58 +++++-
- crates/sum_tree/Cargo.toml                       |   3 +-
- crates/sum_tree/src/cursor.rs                    |   2 +-
- crates/sum_tree/src/sum_tree.rs                  |   7 +-
- 74 files changed, 7217 insertions(+), 475 deletions(-)
+ ACCESSIBILITY_PLAN.md                            |   49 +++++
+ Cargo.lock                                       |   65 ++++++-
+ Cargo.toml                                       |    8 +
+ crates/agent_ui/src/message_editor.rs            |    2 +-
+ crates/gpui/Cargo.toml                           |    4 +-
+ crates/gpui/src/app.rs                           |  144 +++++++++++++-
+ crates/gpui/src/assets.rs                        |   23 +++
+ crates/gpui/src/d3d11_surface.rs                 |   64 +++++++
+ crates/gpui/src/debug_overlay.rs                 |    4 +
+ crates/gpui/src/dmabuf.rs                        |  148 ++++++++++++++
+ crates/gpui/src/element.rs                       |    2 +-
+ crates/gpui/src/elements/div.rs                  |   34 +++-
+ crates/gpui/src/elements/img.rs                  |   86 +++++++--
+ crates/gpui/src/elements/surface.rs              |   48 ++++-
+ crates/gpui/src/elements/text.rs                 |  149 +++++++++++++-
+ crates/gpui/src/gpui.rs                          |   10 +
+ crates/gpui/src/hot_reload.rs                    |   64 +++++--
+ crates/gpui/src/hot_reload_status.rs             |   94 +++++++++
+ crates/gpui/src/interactive.rs                   |    7 +
+ crates/gpui/src/key_dispatch.rs                  |   52 +++++
+ crates/gpui/src/platform.rs                      |  123 +++++++++++-
+ crates/gpui/src/platform/keystroke.rs            |   41 ++--
+ crates/gpui/src/platform/platform_info.rs        |   17 ++
+ crates/gpui/src/scene.rs                         |  163 ++++++++++++++++
+ crates/gpui/src/style.rs                         |   18 ++
+ crates/gpui/src/styled.rs                        |   12 +-
+ crates/gpui/src/taffy.rs                         |  155 +++++++++++++++
+ crates/gpui/src/text_system.rs                   |  105 +++++++++-
+ crates/gpui/src/text_system/glow_mask.rs         |  182 ++++++++++++++++++
+ crates/gpui/src/text_system/line.rs              |  120 +++++++++++-
+ crates/gpui/src/window.rs                        | 1075 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++----
+ crates/gpui/src/window/a11y.rs                   |   18 +-
+ crates/gpui_apple/Cargo.toml                     |    7 +
+ crates/gpui_apple/build.rs                       |    4 +
+ crates/gpui_apple/src/gpui_apple.rs              |    5 +
+ crates/gpui_apple/src/metal_custom_shader.rs     |  535 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_apple/src/metal_renderer.rs          |  641 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ crates/gpui_apple/src/shaders.metal              |  192 ++++++++++++++++++-
+ crates/gpui_apple/src/text_system.rs             |   27 ++-
+ crates/gpui_ios/Cargo.toml                       |    6 +-
+ crates/gpui_ios/src/gpui_ios.rs                  |    2 +-
+ crates/gpui_ios/src/ios.rs                       |    9 +
+ crates/gpui_ios/src/ios/document_picker.rs       |  132 +++++++++++++
+ crates/gpui_ios/src/ios/drag.rs                  |  222 +++++++++++++++++++++
+ crates/gpui_ios/src/ios/drop.rs                  |  267 ++++++++++++++++++++++++++
+ crates/gpui_ios/src/ios/events.rs                |   19 +-
+ crates/gpui_ios/src/ios/keyboard.rs              |  438 ++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_ios/src/ios/menus.rs                 |  565 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_ios/src/ios/platform.rs              |  133 ++++++++++---
+ crates/gpui_ios/src/ios/pointer.rs               |  223 +++++++++++++++++++++
+ crates/gpui_ios/src/ios/security_scope.rs        |  122 ++++++++++++
+ crates/gpui_ios/src/ios/share_sheet.rs           |   79 ++++++++
+ crates/gpui_ios/src/ios/shifted_keys.rs          |   73 +++++++
+ crates/gpui_ios/src/ios/text_input.rs            |   32 +++-
+ crates/gpui_ios/src/ios/window.rs                |  435 +++++++++++++++++++++++++++++++++++++++--
+ crates/gpui_ios/tests/text_input.rs              |   27 +++
+ crates/gpui_linux/Cargo.toml                     |    1 +
+ crates/gpui_linux/src/linux/platform.rs          |   47 ++++-
+ crates/gpui_linux/src/linux/wayland.rs           |    2 +-
+ crates/gpui_linux/src/linux/wayland/client.rs    |    3 +
+ crates/gpui_linux/src/linux/wayland/clipboard.rs |   78 +++++++-
+ crates/gpui_linux/src/linux/wayland/window.rs    |  252 ++++++++++++++++++++----
+ crates/gpui_linux/src/linux/x11/client.rs        |   42 +++-
+ crates/gpui_linux/src/linux/x11/clipboard.rs     |   16 +-
+ crates/gpui_linux/src/linux/x11/window.rs        |   60 +++++-
+ crates/gpui_macos/src/events.rs                  |   37 +++-
+ crates/gpui_macos/src/pasteboard.rs              |   53 ++++-
+ crates/gpui_macos/src/platform.rs                |   57 +++++-
+ crates/gpui_macos/src/window.rs                  |  175 +++++------------
+ crates/gpui_util/src/lib.rs                      |   18 +-
+ crates/gpui_web/Cargo.toml                       |    5 +-
+ crates/gpui_web/src/window.rs                    |   12 +-
+ crates/gpui_wgpu/Cargo.toml                      |   10 +-
+ crates/gpui_wgpu/src/cosmic_text_system.rs       |   78 +++++++-
+ crates/gpui_wgpu/src/dmabuf_texture.rs           |  216 +++++++++++++++++++++
+ crates/gpui_wgpu/src/gpui_wgpu.rs                |    2 +
+ crates/gpui_wgpu/src/shaders.wgsl                |   96 +++++++++-
+ crates/gpui_wgpu/src/shaders_webgl.wgsl          |   82 ++++----
+ crates/gpui_wgpu/src/wgpu_context.rs             |  226 ++++++++++++++++++++++
+ crates/gpui_wgpu/src/wgpu_renderer.rs            |  542 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ crates/gpui_windows/Cargo.toml                   |    1 +
+ crates/gpui_windows/build.rs                     |    1 +
+ crates/gpui_windows/src/clipboard.rs             |   73 ++++++-
+ crates/gpui_windows/src/direct_write.rs          |   96 ++++++++--
+ crates/gpui_windows/src/directx_custom_shader.rs |  420 ++++++++++++++++++++++++++++++++++++++++
+ crates/gpui_windows/src/directx_renderer.rs      |  270 ++++++++++++++++++++++++--
+ crates/gpui_windows/src/events.rs                |  122 +++++++++++-
+ crates/gpui_windows/src/gpui_windows.rs          |    2 +
+ crates/gpui_windows/src/keyboard.rs              |   71 +++----
+ crates/gpui_windows/src/native_drag.rs           |  409 +++++++++++++++++++++++++++++++++++++++
+ crates/gpui_windows/src/platform.rs              |    5 +-
+ crates/gpui_windows/src/shaders.hlsl             |   44 +++++
+ crates/gpui_windows/src/util.rs                  |   14 ++
+ crates/gpui_windows/src/window.rs                |   73 ++++++-
+ crates/sum_tree/Cargo.toml                       |    3 +-
+ crates/sum_tree/src/cursor.rs                    |    2 +-
+ crates/sum_tree/src/sum_tree.rs                  |    7 +-
+ 97 files changed, 10424 insertions(+), 580 deletions(-)
 ```
 
-_Last generated: 2026-10-21 (after merge commit `77cfef62`)._
+_Last generated: 2026-11-17 (on merge commit `abdd6f00`, this file left out)._
