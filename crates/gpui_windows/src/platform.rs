@@ -468,6 +468,11 @@ impl WindowsPlatform {
                     };
                     for hwnd in all_windows.read().iter() {
                         unsafe {
+                            // A destroyed window stays in the list until the
+                            // main thread has handled WM_GPUI_CLOSE_ONE_WINDOW.
+                            if !IsWindow(Some(hwnd.as_raw())).as_bool() {
+                                continue;
+                            }
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
                                     && !IsIconic(hwnd.as_raw()).as_bool()

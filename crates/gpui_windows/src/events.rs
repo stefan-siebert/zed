@@ -362,6 +362,12 @@ impl WindowsWindowInner {
         // WM_ACTIVATE) will see this flag and skip update_window calls.
         self.closed.set(true);
 
+        // The drop target is released here, while the handle is still valid.
+        // `Drop for WindowsWindow` used to do it, but for a window the system
+        // destroys (the user closed it) that runs after the handle is gone:
+        // the call failed, the target leaked and the log got an error.
+        unsafe { windows::Win32::System::Ole::RevokeDragDrop(handle).log_err() };
+
         let callback = { self.state.callbacks.close.take() };
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {
