@@ -224,7 +224,7 @@ whose `SetData` keeps what the Shell's drag-image manager stores, and
 | Commit | Change |
 |---|---|
 | `6d13b23a` | Keep unshifted key + shift modifier in `get_keystroke_key` |
-| `01ff34dd` | Drop shift modifier on keybinding side after shifted-key substitution |
+| `01ff34dd` | ~~Drop shift modifier on keybinding side after shifted-key substitution~~ — taken back 2026-11-18: `6d13b23a` superseded it on the runtime side, and what stayed behind only made `map_key_equivalent` show `ctrl-shift-4` as Ctrl+4. The mapper is upstream's again; `keyboard::tests::test_keyboard_mapper` is green. |
 | (2026-11-17) | **`KeyBinding::load_with_mapper(…, keyboard_mapper, os)`** — `load` without an `App`. Upstream's `load` took the mapper until this merge and takes `cx` since, which always means the platform's own mapper and its own OS. Elane binds its registry through `DummyKeyboardMapper` on purpose (its keystrokes are key labels, the two rows above) and builds keymaps in tests that have no `App`. Same body as `load`, the two inputs handed over. |
 
 ## 6a. Auto-repeat reaches keystroke interceptors
@@ -516,9 +516,9 @@ Verified 2026-11-17 on the Mac (macOS 27.2, debug build, Elane at `merge/upstrea
 Found only by running, not by the line audit: `suspend_hovers` swallowed presses (§8, `e76d60ed41`).
 Not checked here: trackpad momentum (needs a hand on the trackpad).
 
-Known and older than this merge: `gpui_windows` `keyboard::tests::test_keyboard_mapper` fails — it asserts
-upstream's shift handling, which `01ff34dde3` changed on purpose. The test module did not compile before this
-merge, so it never showed.
+Older than this merge, fixed 2026-11-18: `gpui_windows` `keyboard::tests::test_keyboard_mapper` failed — it
+asserts upstream's shift handling, which the leftover half of `01ff34dde3` contradicted (§6). The test module
+did not compile before this merge, so it never showed.
 
 ---
 
