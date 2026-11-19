@@ -1063,6 +1063,11 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
+    // `DirectXRenderer::draw_backdrop_blurs`.
+    fn supports_backdrop_blur(&self) -> bool {
+        true
+    }
+
     fn register_custom_shader(&self, wgsl_fragment: &str, label: &str) -> Option<CustomShaderId> {
         self.state
             .renderer

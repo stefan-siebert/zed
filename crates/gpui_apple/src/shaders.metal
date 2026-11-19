@@ -1434,6 +1434,39 @@ struct BackdropBlurFragmentOutput {
   float4 coverage [[color(0), index(1)]];
 };
 
+// The sRGB curve as it is defined, not the 2.2 power of `srgb_to_linear`:
+// the ceiling is a WCAG relative luminance, which is defined on this one,
+// and whoever sets it counts on the number.
+float3 backdrop_to_linear(float3 color) {
+  float3 low = color / 12.92;
+  float3 high = pow(abs((color + 0.055) / 1.055), float3(2.4));
+  return mix(high, low, step(color, float3(0.04045)));
+}
+
+float3 backdrop_from_linear(float3 color) {
+  float3 low = color * 12.92;
+  float3 high = 1.055 * pow(abs(color), float3(1.0 / 2.4)) - 0.055;
+  return mix(high, low, step(color, float3(0.0031308)));
+}
+
+// Hold a colour under a relative luminance: white comes out at `ceiling`,
+// black stays black, and the darker a colour is the less it moves —
+// L' = L·C / (C + L·(1 − C)), `BackdropBlur::luminance_under_ceiling` in
+// scene.rs. The linear colour is scaled as a whole, which keeps its hue.
+// `color` is premultiplied; over an opaque window that is the colour itself,
+// and where the desktop shows through it is the part of it this frame adds.
+// The port of `backdrop_under_ceiling` in gpui_windows/src/shaders.hlsl —
+// keep the two in step.
+float3 backdrop_under_ceiling(float3 color, float ceiling) {
+  if (ceiling <= 0.0 || ceiling >= 1.0) {
+    return color;
+  }
+  float3 linear_color = backdrop_to_linear(saturate(color));
+  float luminance = dot(linear_color, float3(0.2126, 0.7152, 0.0722));
+  float scale = ceiling / (ceiling + luminance * (1.0 - ceiling));
+  return backdrop_from_linear(linear_color * scale);
+}
+
 fragment BackdropBlurFragmentOutput backdrop_blur_fragment(
     BackdropBlurFragmentInput input [[stage_in]],
     constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_BackdropBlurs)]],
@@ -1463,11 +1496,14 @@ fragment BackdropBlurFragmentOutput backdrop_blur_fragment(
     float edge = saturate(1.0 + distance / blur.bevel);
     float lens = edge * edge * (3.0 - 2.0 * edge);
     float2 shift = normal * blur.refraction * lens;
-    // Dispersion: red bends least, blue most.
-    float4 centre = blurred.sample(texture_sampler, (at - shift) / viewport);
-    float red = blurred.sample(texture_sampler, (at - shift * 0.9) / viewport).r;
-    float blue = blurred.sample(texture_sampler, (at - shift * 1.1) / viewport).b;
-    backdrop = float4(red, centre.g, blue, centre.a);
+    backdrop = blurred.sample(texture_sampler, (at - shift) / viewport);
+    if (blur.dispersion != 0.0) {
+      // Dispersion: red bends least, blue most.
+      backdrop.r = blurred.sample(
+          texture_sampler, (at - shift * (1.0 - blur.dispersion)) / viewport).r;
+      backdrop.b = blurred.sample(
+          texture_sampler, (at - shift * (1.0 + blur.dispersion)) / viewport).b;
+    }
   } else {
     // The blurred copy covers the whole viewport, so sample it by screen
     // position rather than by a per-quad UV.
@@ -1480,8 +1516,26 @@ fragment BackdropBlurFragmentOutput backdrop_blur_fragment(
   // shows through stays as see-through as it was — and mixes with the target
   // only by the shape's coverage along its edge (dual-source blend,
   // out = color + dst * (1 - coverage)).
+  //
+  // The colour matrix first: it is about the backdrop, not about the tint
+  // laid over it. Premultiplied, a row's constant counts by the alpha, and
+  // nothing leaves [0, alpha] (`BackdropBlur::color_through` in scene.rs).
+  // `color_matrix` is the three rows one after the other.
+  float4 sampled = float4(backdrop.rgb, backdrop.a);
+  float4 color_red = float4(blur.color_matrix[0], blur.color_matrix[1],
+                            blur.color_matrix[2], blur.color_matrix[3]);
+  float4 color_green = float4(blur.color_matrix[4], blur.color_matrix[5],
+                              blur.color_matrix[6], blur.color_matrix[7]);
+  float4 color_blue = float4(blur.color_matrix[8], blur.color_matrix[9],
+                             blur.color_matrix[10], blur.color_matrix[11]);
+  backdrop.rgb = clamp(
+      float3(dot(color_red, sampled), dot(color_green, sampled),
+             dot(color_blue, sampled)),
+      float3(0.0), float3(backdrop.a));
   float4 tint = float4(input.tint.rgb * input.tint.a, input.tint.a);
   float4 color = tint + backdrop * (1.0 - tint.a);
+  // Last, so that the ceiling holds for what is shown, tint included.
+  color.rgb = backdrop_under_ceiling(color.rgb, blur.luminance_ceiling);
 
   float coverage = saturate(0.5 - distance);
   BackdropBlurFragmentOutput output;

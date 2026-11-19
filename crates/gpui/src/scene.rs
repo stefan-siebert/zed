@@ -662,7 +662,7 @@ pub struct Underline {
 ///
 /// Field order and padding match `BackdropBlur` in the platform shaders; keep
 /// the two in sync.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct BackdropBlur {
     /// Draw order (assigned by the scene).
@@ -681,11 +681,220 @@ pub struct BackdropBlur {
     pub tint: Hsla,
     /// How far, in device pixels, the backdrop is displaced right at the
     /// edge — the lens of a glass surface. Along the edge the shape shows
-    /// what lies further inside it, bent; `0` is a flat pane.
+    /// what lies further inside it; `0` is a flat pane.
+    ///
+    /// The displacement falls to nothing over `bevel` as a smoothstep
+    /// ([`Self::lens_shift`]), as in gpui-liquid-glass, whose "Clear" has
+    /// 26 px over a bevel of 16. At about that ratio most of the band is a
+    /// mirror image of what lies inside it, a little smaller than life,
+    /// turning softly at both ends. **Near `refraction == bevel` there is
+    /// no image**: the whole band samples one line and pulls it into
+    /// streaks across the edge.
     pub refraction: f32,
     /// Width in device pixels of the band along the edge over which the
     /// displacement falls to nothing.
     pub bevel: f32,
+    /// The brightest the shape shows its backdrop, as a relative luminance
+    /// (WCAG, 0..1): white behind it comes out at this, black stays black,
+    /// and the darker a colour is the less it is moved
+    /// ([`Self::luminance_under_ceiling`]). What text needs to be read over
+    /// any picture, without darkening a picture that is dark already — a
+    /// tint of fixed density does both or neither. `0` (and anything from
+    /// `1` up) is no ceiling.
+    pub luminance_ceiling: f32,
+    /// How differently the lens bends the colours: red is displaced by
+    /// `1 - dispersion` of `refraction`, blue by `1 + dispersion`, which
+    /// puts a coloured fringe on every edge the rim shows. `0` bends all
+    /// three alike.
+    pub dispersion: f32,
+    /// What the shape makes of the colours of its backdrop: three rows —
+    /// red, green, blue — each applied to `(r, g, b, 1)` of the sampled
+    /// colour as the frame holds it (sRGB-encoded), the result clamped
+    /// ([`Self::color_through`]). Before the tint and the ceiling. A glass
+    /// that lifts black and takes the edge off white is such a matrix;
+    /// [`Self::IDENTITY`] leaves the backdrop as it is.
+    pub color_matrix: [f32; 12],
+}
+
+impl Default for BackdropBlur {
+    /// Shows the backdrop as it is — not the all-zero value, whose colour
+    /// matrix would show black.
+    fn default() -> Self {
+        Self {
+            order: 0,
+            blur_radius: 0.,
+            bounds: Bounds::default(),
+            content_mask: ContentMask::default(),
+            corner_radii: Corners::default(),
+            tint: Hsla::default(),
+            refraction: 0.,
+            bevel: 0.,
+            luminance_ceiling: 0.,
+            dispersion: 0.,
+            color_matrix: Self::IDENTITY,
+        }
+    }
+}
+
+impl BackdropBlur {
+    /// The colour matrix that changes nothing.
+    pub const IDENTITY: [f32; 12] = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0.];
+
+    /// What `color_matrix` makes of an opaque colour of the backdrop. What
+    /// the platform shaders compute, for whoever has to reason about the
+    /// result.
+    pub fn color_through(&self, [red, green, blue]: [f32; 3]) -> [f32; 3] {
+        let row = |row: usize| {
+            let at = row * 4;
+            (self.color_matrix[at] * red
+                + self.color_matrix[at + 1] * green
+                + self.color_matrix[at + 2] * blue
+                + self.color_matrix[at + 3])
+                .clamp(0., 1.)
+        };
+        [row(0), row(1), row(2)]
+    }
+
+    /// What a `luminance_ceiling` makes of a relative luminance:
+    /// `L·C / (C + L·(1 − C))`. The platform shaders scale the linear colour
+    /// by the ratio of the two, which keeps its hue; this is the same curve
+    /// for whoever has to reason about the result — a contrast test.
+    pub fn luminance_under_ceiling(luminance: f32, ceiling: f32) -> f32 {
+        if ceiling <= 0. || ceiling >= 1. {
+            return luminance;
+        }
+        luminance * ceiling / (ceiling + luminance * (1. - ceiling))
+    }
+
+    /// How far inwards the backdrop is sampled, `depth` device pixels inside
+    /// the edge: `refraction` at the edge, falling to nothing at `bevel` as
+    /// a smoothstep. What the platform shaders compute, for whoever has to
+    /// reason about what a rim shows.
+    pub fn lens_shift(&self, depth: f32) -> f32 {
+        if self.refraction <= 0. || self.bevel <= 0. {
+            return 0.;
+        }
+        let edge = (1. - depth / self.bevel).clamp(0., 1.);
+        self.refraction * edge * edge * (3. - 2. * edge)
+    }
+}
+
+/// How `Window::paint_backdrop` shows the frame behind a shape. The default
+/// is the frame as it is; every field adds one thing. Lengths are logical
+/// pixels and scale with the window.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Backdrop {
+    /// Blur radius; `0` is none.
+    pub blur_radius: Pixels,
+    /// Tint composited over the backdrop; transparent is none.
+    pub tint: Hsla,
+    /// How far the backdrop is displaced right at the edge — the lens.
+    pub refraction: Pixels,
+    /// Width of the band along the edge the displacement falls off over.
+    pub bevel: Pixels,
+    /// The brightest the backdrop may show, as a relative luminance; `0` is
+    /// no ceiling. See [`BackdropBlur::luminance_ceiling`].
+    pub luminance_ceiling: f32,
+    /// How differently the lens bends red and blue; `0` is not at all. See
+    /// [`BackdropBlur::dispersion`].
+    pub dispersion: f32,
+    /// What the shape makes of the colours of the backdrop, as three rows
+    /// over `(r, g, b, 1)`; `None` leaves them. See
+    /// [`BackdropBlur::color_matrix`].
+    pub color_matrix: Option<[[f32; 4]; 3]>,
+}
+
+#[cfg(test)]
+mod backdrop_tests {
+    use super::BackdropBlur;
+
+    /// White lands on the ceiling, black stays, nothing in between is
+    /// brighter than the ceiling or brighter than it was, and the order of
+    /// two luminances is kept.
+    #[test]
+    fn a_luminance_ceiling_holds_and_spares_the_dark() {
+        for ceiling in [0.03f32, 0.175, 0.28] {
+            assert!((BackdropBlur::luminance_under_ceiling(1., ceiling) - ceiling).abs() < 1e-6);
+            assert_eq!(BackdropBlur::luminance_under_ceiling(0., ceiling), 0.);
+            let mut before = 0.;
+            for step in 1..=100 {
+                let luminance = step as f32 / 100.;
+                let under = BackdropBlur::luminance_under_ceiling(luminance, ceiling);
+                assert!(under <= ceiling + 1e-6 && under <= luminance);
+                assert!(under > before);
+                before = under;
+            }
+        }
+        // A dark picture is all but left alone: a tenth of the ceiling
+        // loses less than a tenth of itself.
+        let dark = BackdropBlur::luminance_under_ceiling(0.0175, 0.175);
+        assert!(dark > 0.0175 * 0.9, "{dark}");
+    }
+
+    /// How much of the backdrop a rim shows, in pixels: the span of the
+    /// depths its band samples.
+    fn shown(refraction: f32, bevel: f32) -> f32 {
+        let rim = BackdropBlur {
+            refraction,
+            bevel,
+            ..Default::default()
+        };
+        let depths = (0..=64).map(|step| {
+            let depth = bevel * step as f32 / 64.;
+            depth + rim.lens_shift(depth)
+        });
+        let (low, high) = depths.fold((f32::MAX, f32::MIN), |(low, high), depth| {
+            (low.min(depth), high.max(depth))
+        });
+        high - low
+    }
+
+    /// The lens is `refraction` at the edge and nothing a bevel inside. At
+    /// the proportions of gpui-liquid-glass (26 on 16) the band shows about
+    /// three quarters of its own width of backdrop; at a refraction equal
+    /// to the bevel, a fraction of that — one line, pulled into streaks.
+    #[test]
+    fn a_rim_shows_backdrop_only_away_from_refraction_equal_to_bevel() {
+        let rim = BackdropBlur {
+            refraction: 26.,
+            bevel: 16.,
+            ..Default::default()
+        };
+        assert_eq!(rim.lens_shift(0.), 26.);
+        assert_eq!(rim.lens_shift(16.), 0.);
+        assert_eq!(rim.lens_shift(40.), 0.);
+
+        assert!(shown(26., 16.) > 0.7 * 16., "{}", shown(26., 16.));
+        assert!(shown(16., 16.) < 0.2 * 16., "{}", shown(16., 16.));
+
+        // No lens asked for, none computed.
+        assert_eq!(BackdropBlur::default().lens_shift(0.), 0.);
+    }
+
+    /// The default shows the backdrop as it is; a matrix is applied row by
+    /// row over `(r, g, b, 1)` and the result clamped.
+    #[test]
+    fn a_colour_matrix_is_applied_row_by_row_and_the_default_changes_nothing() {
+        let plain = BackdropBlur::default();
+        assert_eq!(plain.color_through([0.2, 0.5, 0.9]), [0.2, 0.5, 0.9]);
+
+        let lifted = BackdropBlur {
+            // Red from blue plus a tenth, green halved, blue past white.
+            color_matrix: [0., 0., 1., 0.1, 0., 0.5, 0., 0., 0., 0., 2., 0.],
+            ..Default::default()
+        };
+        let [red, green, blue] = lifted.color_through([0.2, 0.5, 0.9]);
+        assert!((red - 1.0).abs() < 1e-6 && (green - 0.25).abs() < 1e-6);
+        assert_eq!(blue, 1.0);
+    }
+
+    /// No ceiling: the default of the struct, and anything from 1 up.
+    #[test]
+    fn no_ceiling_changes_nothing() {
+        for ceiling in [0.0f32, -1., 1., 2.] {
+            assert_eq!(BackdropBlur::luminance_under_ceiling(0.6, ceiling), 0.6);
+        }
+    }
 }
 
 impl From<BackdropBlur> for Primitive {

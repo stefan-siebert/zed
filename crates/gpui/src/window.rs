@@ -8,8 +8,8 @@ use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds,
-    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, CustomShaderId,
+    AsyncWindowContext, AtlasTile, AvailableSpace, Backdrop, BackdropBlur, Background, BorderStyle,
+    Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, CustomShaderId,
     CustomShaderInstance, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId,
     DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, ExternalDragPayload,
     FileDropEvent, FontId, Global, GlobalElementId, GlowParams, GlyphId, GpuSpecs, Hsla,
@@ -5163,9 +5163,14 @@ impl Window {
 
     /// [`Self::paint_backdrop_blur`] with a lens along the edge: within
     /// `bevel` of the shape's edge the backdrop is displaced inwards by up to
-    /// `refraction`, so the rim shows what lies further inside, bent — what
-    /// makes a surface read as a body of glass rather than as a frosted pane.
-    /// The three colour channels bend slightly differently, as in real glass.
+    /// `refraction`, so the rim shows what lies further inside — what makes
+    /// a surface read as a body of glass rather than as a frosted pane. The
+    /// three colour channels bend slightly differently, as in real glass.
+    ///
+    /// The two lengths together set what the rim shows
+    /// ([`BackdropBlur::refraction`]): keep `refraction` well away from
+    /// `bevel`, where it shows one line pulled into streaks.
+    /// gpui-liquid-glass has 26 on 16.
     ///
     /// A small `blur_radius` keeps the backdrop recognisable, which is what
     /// the lens needs to be seen at all. All lengths are in logical pixels.
@@ -5180,18 +5185,58 @@ impl Window {
         refraction: Pixels,
         bevel: Pixels,
     ) {
+        self.paint_backdrop(
+            bounds,
+            corner_radii,
+            Backdrop {
+                blur_radius,
+                tint,
+                refraction,
+                bevel,
+                luminance_ceiling: 0.,
+                // What this lens always had: a tenth either way.
+                dispersion: 0.1,
+                color_matrix: None,
+            },
+        );
+    }
+
+    /// Show the frame painted so far through a shape, as `backdrop` says:
+    /// blurred, its colours changed, tinted, bent along the edge, held under
+    /// a brightness — each of them or none. [`Self::paint_backdrop_blur`] and
+    /// [`Self::paint_backdrop_lens`] are this with the rest left out.
+    ///
+    /// Where [`Self::supports_backdrop_blur`] is `false` nothing is painted:
+    /// the renderer cannot read the frame, and a ceiling over a picture it
+    /// cannot see is no ceiling. A caller that needs its text readable there
+    /// paints an opaque surface instead.
+    pub fn paint_backdrop(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        backdrop: Backdrop,
+    ) {
         self.invalidator.debug_assert_paint();
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
         self.next_frame.scene.insert_primitive(BackdropBlur {
             order: 0,
-            blur_radius: f32::from(blur_radius * scale_factor),
+            blur_radius: f32::from(backdrop.blur_radius * scale_factor),
             bounds: bounds.scale(scale_factor),
             content_mask: content_mask.scale(scale_factor),
             corner_radii: corner_radii.scale(scale_factor),
-            tint,
-            refraction: f32::from(refraction * scale_factor),
-            bevel: f32::from(bevel * scale_factor),
+            tint: backdrop.tint,
+            refraction: f32::from(backdrop.refraction * scale_factor),
+            bevel: f32::from(backdrop.bevel * scale_factor),
+            luminance_ceiling: backdrop.luminance_ceiling,
+            dispersion: backdrop.dispersion,
+            color_matrix: backdrop.color_matrix.map_or(BackdropBlur::IDENTITY, |rows| {
+                let mut flat = [0.; 12];
+                for (cell, value) in flat.iter_mut().zip(rows.iter().flatten()) {
+                    *cell = *value;
+                }
+                flat
+            }),
         });
     }
 

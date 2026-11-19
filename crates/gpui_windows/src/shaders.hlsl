@@ -1310,3 +1310,226 @@ float4 surface_fragment(SurfaceVertexOutput input): SV_Target {
     color.a = 1.0;
     return color;
 }
+
+/*
+**
+**              Backdrop blur
+**
+*/
+
+// Blurs, or bends along a shape's edge, what has ALREADY been painted into
+// the render target. The swap chain's buffer cannot be sampled, so the
+// renderer copies the region into a texture first (`draw_backdrop_blurs` in
+// directx_renderer.rs); everything here reads that copy, or the half
+// resolution chain made from it. The port of the Metal shaders in
+// gpui_apple/src/shaders.metal — keep the two in step.
+//
+// The target is premultiplied (every pipeline here blends SRC_ALPHA into
+// it), and the passes average it as it is.
+
+cbuffer KawaseParams: register(b2) {
+    // One texel of the source, in uv.
+    float2 kawase_texel;
+    // Tap distance, in texels.
+    float kawase_offset;
+    float kawase_pad;
+    // The region to shade, normalised: only what the frame's blurs need.
+    float2 kawase_origin;
+    float2 kawase_size;
+};
+
+struct KawaseVertexOutput {
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD0;
+};
+
+KawaseVertexOutput kawase_vertex(uint vertex_id) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    float2 uv = kawase_origin + unit_vertex * kawase_size;
+    KawaseVertexOutput output;
+    output.position = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    output.uv = uv;
+    return output;
+}
+
+KawaseVertexOutput kawase_down_vertex(uint vertex_id: SV_VertexID) {
+    return kawase_vertex(vertex_id);
+}
+
+// Dual Kawase downsample (Bjorge, ARM, SIGGRAPH 2015): centre tap plus four
+// diagonals, weighted 4:1:1:1:1.
+float4 kawase_down_fragment(KawaseVertexOutput input): SV_Target {
+    float2 uv = input.uv;
+    float2 offset = kawase_texel * kawase_offset;
+    float4 sum = t_sprite.Sample(s_sprite, uv) * 4.0;
+    sum += t_sprite.Sample(s_sprite, uv - offset);
+    sum += t_sprite.Sample(s_sprite, uv + offset);
+    sum += t_sprite.Sample(s_sprite, uv + float2(offset.x, -offset.y));
+    sum += t_sprite.Sample(s_sprite, uv - float2(offset.x, -offset.y));
+    return sum / 8.0;
+}
+
+KawaseVertexOutput kawase_up_vertex(uint vertex_id: SV_VertexID) {
+    return kawase_vertex(vertex_id);
+}
+
+// Dual Kawase upsample: eight taps on a rotated square, weighted 1:2 for the
+// axis-aligned and diagonal rings.
+float4 kawase_up_fragment(KawaseVertexOutput input): SV_Target {
+    float2 uv = input.uv;
+    float2 offset = kawase_texel * kawase_offset;
+    float4 sum = t_sprite.Sample(s_sprite, uv + float2(-offset.x * 2.0, 0.0));
+    sum += t_sprite.Sample(s_sprite, uv + float2(-offset.x, offset.y)) * 2.0;
+    sum += t_sprite.Sample(s_sprite, uv + float2(0.0, offset.y * 2.0));
+    sum += t_sprite.Sample(s_sprite, uv + float2(offset.x, offset.y)) * 2.0;
+    sum += t_sprite.Sample(s_sprite, uv + float2(offset.x * 2.0, 0.0));
+    sum += t_sprite.Sample(s_sprite, uv + float2(offset.x, -offset.y)) * 2.0;
+    sum += t_sprite.Sample(s_sprite, uv + float2(0.0, -offset.y * 2.0));
+    sum += t_sprite.Sample(s_sprite, uv + float2(-offset.x, -offset.y)) * 2.0;
+    return sum / 12.0;
+}
+
+// `gpui::BackdropBlur`, field for field: the stride is taken from here.
+struct BackdropBlur {
+    uint order;
+    float blur_radius;
+    Bounds bounds;
+    Bounds content_mask;
+    Corners corner_radii;
+    Hsla tint;
+    float refraction;
+    float bevel;
+    float luminance_ceiling;
+    float dispersion;
+    // `color_matrix`, a row each.
+    float4 color_red;
+    float4 color_green;
+    float4 color_blue;
+};
+
+// The sRGB curve as it is defined, not the 2.2 power of `srgb_to_linear`:
+// the ceiling is a WCAG relative luminance, which is defined on this one,
+// and whoever sets it counts on the number.
+float3 backdrop_to_linear(float3 color) {
+    float3 low = color / 12.92;
+    // `abs`: the compiler cannot see that nothing here is negative.
+    float3 high = pow(abs((color + 0.055) / 1.055), 2.4);
+    return lerp(high, low, step(color, float3(0.04045, 0.04045, 0.04045)));
+}
+
+float3 backdrop_from_linear(float3 color) {
+    float3 low = color * 12.92;
+    float3 high = 1.055 * pow(abs(color), 1.0 / 2.4) - 0.055;
+    return lerp(high, low, step(color, float3(0.0031308, 0.0031308, 0.0031308)));
+}
+
+// Hold a colour under a relative luminance: white comes out at `ceiling`,
+// black stays black, and the darker a colour is the less it moves —
+// L' = L·C / (C + L·(1 − C)), `BackdropBlur::luminance_under_ceiling` in
+// scene.rs. The linear colour is scaled as a whole, which keeps its hue.
+// `color` is premultiplied; over an opaque window that is the colour itself,
+// and where the desktop shows through it is the part of it this frame adds.
+float3 backdrop_under_ceiling(float3 color, float ceiling) {
+    if (ceiling <= 0.0 || ceiling >= 1.0) {
+        return color;
+    }
+    float3 linear_color = backdrop_to_linear(saturate(color));
+    float luminance = dot(linear_color, float3(0.2126, 0.7152, 0.0722));
+    float scale = ceiling / (ceiling + luminance * (1.0 - ceiling));
+    return backdrop_from_linear(linear_color * scale);
+}
+
+struct BackdropBlurVertexOutput {
+    nointerpolation uint blur_id: TEXCOORD0;
+    float4 position: SV_Position;
+    nointerpolation float4 tint: COLOR0;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct BackdropBlurFragmentInput {
+    nointerpolation uint blur_id: TEXCOORD0;
+    float4 position: SV_Position;
+    nointerpolation float4 tint: COLOR0;
+};
+
+// The composite's two outputs for dual-source blending
+// (`create_blend_state_for_backdrop_composite`): `color` replaces the target,
+// `coverage.a` says how much of it.
+struct BackdropBlurFragmentOutput {
+    float4 color: SV_Target0;
+    float4 coverage: SV_Target1;
+};
+
+StructuredBuffer<BackdropBlur> backdrop_blurs: register(t1);
+
+BackdropBlurVertexOutput backdrop_blur_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint blur_id = batch_start_index + instance_id;
+    BackdropBlur blur = backdrop_blurs[blur_id];
+
+    BackdropBlurVertexOutput output;
+    output.blur_id = blur_id;
+    output.position = to_device_position(unit_vertex, blur.bounds);
+    output.tint = hsla_to_rgba(blur.tint);
+    output.clip_distance = distance_from_clip_rect(unit_vertex, blur.bounds, blur.content_mask);
+    return output;
+}
+
+BackdropBlurFragmentOutput backdrop_blur_fragment(BackdropBlurFragmentInput input) {
+    BackdropBlur blur = backdrop_blurs[input.blur_id];
+    float2 at = input.position.xy;
+    float distance = quad_sdf(at, blur.bounds, blur.corner_radii);
+
+    float4 backdrop;
+    if (blur.refraction > 0.0 && blur.bevel > 0.0) {
+        // The lens: within `bevel` of the edge the sample point moves inwards
+        // along the edge's normal, most right at the edge. The normal is the
+        // gradient of the shape's distance field.
+        float2 normal = normalize(
+            float2(quad_sdf(at + float2(0.5, 0.0), blur.bounds, blur.corner_radii) -
+                       quad_sdf(at - float2(0.5, 0.0), blur.bounds, blur.corner_radii),
+                   quad_sdf(at + float2(0.0, 0.5), blur.bounds, blur.corner_radii) -
+                       quad_sdf(at - float2(0.0, 0.5), blur.bounds, blur.corner_radii)) +
+            float2(1e-6, 1e-6));
+        float edge = saturate(1.0 + distance / blur.bevel);
+        float lens = edge * edge * (3.0 - 2.0 * edge);
+        float2 shift = normal * blur.refraction * lens;
+        backdrop = t_sprite.Sample(s_sprite, (at - shift) / global_viewport_size);
+        if (blur.dispersion != 0.0) {
+            // Dispersion: red bends least, blue most.
+            backdrop.r = t_sprite.Sample(s_sprite,
+                (at - shift * (1.0 - blur.dispersion)) / global_viewport_size).r;
+            backdrop.b = t_sprite.Sample(s_sprite,
+                (at - shift * (1.0 + blur.dispersion)) / global_viewport_size).b;
+        }
+    } else {
+        // The copy covers the whole viewport, so sample it by screen
+        // position rather than by a per-quad uv.
+        backdrop = t_sprite.Sample(s_sprite, at / global_viewport_size);
+    }
+
+    // Everything here is premultiplied: `backdrop` because it was sampled
+    // from the premultiplied target, `tint` because it is premultiplied now.
+    // This pass REPLACES the region it covers, alpha included, and mixes with
+    // the target only by the shape's coverage along its edge (dual-source
+    // blend, out = color + dst * (1 - coverage)).
+    //
+    // The colour matrix first: it is about the backdrop, not about the tint
+    // laid over it. Premultiplied, a row's constant counts by the alpha, and
+    // nothing leaves [0, alpha] (`BackdropBlur::color_through` in scene.rs).
+    float4 sampled = float4(backdrop.rgb, backdrop.a);
+    backdrop.rgb = clamp(
+        float3(dot(blur.color_red, sampled), dot(blur.color_green, sampled),
+               dot(blur.color_blue, sampled)),
+        0.0, backdrop.a);
+    float4 tint = float4(input.tint.rgb * input.tint.a, input.tint.a);
+    float4 color = tint + backdrop * (1.0 - tint.a);
+    // Last, so that the ceiling holds for what is shown, tint included.
+    color.rgb = backdrop_under_ceiling(color.rgb, blur.luminance_ceiling);
+
+    float coverage = saturate(0.5 - distance);
+    BackdropBlurFragmentOutput output;
+    output.color = color * coverage;
+    output.coverage = float4(coverage, coverage, coverage, coverage);
+    return output;
+}

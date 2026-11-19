@@ -49,6 +49,9 @@ pub(crate) struct DirectXRenderer {
     /// loss — the imports are device-specific.
     opened_surfaces: std::collections::HashMap<isize, OpenedSurface>,
     custom_shaders: CustomShaderResources,
+    /// What a backdrop blur reads and blurs in; made by the first one a
+    /// window paints, dropped with the size and the device it was made for.
+    backdrop_scratch: Option<BackdropScratch>,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
 
@@ -99,6 +102,75 @@ struct DirectXRenderPipelines {
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
     surface_pipeline: PipelineState<SurfaceSprite>,
+    kawase_down_pipeline: PipelineState<KawaseInstance>,
+    kawase_up_pipeline: PipelineState<KawaseInstance>,
+    backdrop_blur_pipeline: PipelineState<BackdropBlur>,
+}
+
+/// The Kawase passes draw one quad and read no instance; `PipelineState`
+/// wants a buffer all the same.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct KawaseInstance {
+    _unused: [f32; 4],
+}
+
+/// `KawaseParams` in shaders.hlsl.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct KawaseParams {
+    texel: [f32; 2],
+    offset: f32,
+    _pad: f32,
+    origin: [f32; 2],
+    size: [f32; 2],
+}
+
+/// The textures of the backdrop blur, all sized for one render target.
+///
+/// The swap chain's buffer cannot be bound as a shader input, so the frame
+/// painted so far is copied into `copy` and read from there. A blur runs
+/// from the copy through the half resolution pair; a lens without a blur
+/// reads the copy itself.
+struct BackdropScratch {
+    copy: ID3D11Texture2D,
+    copy_srv: Option<ID3D11ShaderResourceView>,
+    half_srv: [Option<ID3D11ShaderResourceView>; 2],
+    half_rtv: [Option<ID3D11RenderTargetView>; 2],
+    half_viewport: D3D11_VIEWPORT,
+    /// The views do not keep their textures alive by contract.
+    _half: [ID3D11Texture2D; 2],
+}
+
+impl BackdropScratch {
+    fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
+        let (copy, copy_srv) = create_path_intermediate_texture(device, width, height)?;
+        let (half_width, half_height) = ((width / 2).max(1), (height / 2).max(1));
+        let half = |device: &ID3D11Device| -> Result<_> {
+            let (texture, srv) =
+                create_path_intermediate_texture(device, half_width, half_height)?;
+            let mut rtv = None;
+            unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut rtv))? };
+            Ok((texture, srv, rtv))
+        };
+        let (first, first_srv, first_rtv) = half(device)?;
+        let (second, second_srv, second_rtv) = half(device)?;
+        Ok(Self {
+            copy,
+            copy_srv,
+            half_srv: [first_srv, second_srv],
+            half_rtv: [first_rtv, second_rtv],
+            half_viewport: D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: half_width as f32,
+                Height: half_height as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            },
+            _half: [first, second],
+        })
+    }
 }
 
 /// Instance data for one video surface (see `surface_vertex` in shaders.hlsl).
@@ -121,7 +193,11 @@ struct OpenedSurface {
 struct DirectXGlobalElements {
     global_params_buffer: Option<ID3D11Buffer>,
     batch_params_buffer: Option<ID3D11Buffer>,
+    kawase_params_buffer: Option<ID3D11Buffer>,
     sampler: Option<ID3D11SamplerState>,
+    /// For the backdrop blur: a tap past the edge of the frame repeats the
+    /// edge. `sampler` wraps, and would bring in the opposite side.
+    clamp_sampler: Option<ID3D11SamplerState>,
 }
 
 struct Annotation<'a>(&'a ID3DUserDefinedAnnotation);
@@ -215,6 +291,7 @@ impl DirectXRenderer {
             pipelines,
             opened_surfaces: std::collections::HashMap::new(),
             custom_shaders: CustomShaderResources::new(),
+            backdrop_scratch: None,
             direct_composition,
             font_info: Self::get_font_info(),
             width: 1,
@@ -298,6 +375,7 @@ impl DirectXRenderer {
             }
 
             self.resources.take();
+            self.backdrop_scratch.take();
             if let Some(devices) = &self.devices {
                 devices.device_context.OMSetRenderTargets(None, None);
                 devices.device_context.ClearState();
@@ -414,9 +492,9 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
-                // Not implemented on this backend; `supports_backdrop_blur()`
-                // reports false so call sites fall back to a plain tinted fill.
-                PrimitiveBatch::BackdropBlurs(_) => Ok(()),
+                PrimitiveBatch::BackdropBlurs(range) => {
+                    self.draw_backdrop_blurs(&scene.backdrop_blurs, range)
+                }
                 PrimitiveBatch::CustomShaders { shader_id, range } => {
                     self.draw_custom_shaders(shader_id, range.start, range.len())
                 }
@@ -533,6 +611,7 @@ impl DirectXRenderer {
         }
         self.width = width;
         self.height = height;
+        self.backdrop_scratch = None;
 
         // Clear the render target before resizing
         let devices = self.devices.as_ref().context("devices missing")?;
@@ -617,6 +696,14 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.polychrome_sprites,
+            )?;
+        }
+
+        if !scene.backdrop_blurs.is_empty() {
+            self.pipelines.backdrop_blur_pipeline.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                &scene.backdrop_blurs,
             )?;
         }
 
@@ -767,6 +854,178 @@ impl DirectXRenderer {
             slice::from_ref(&resources.path_intermediate_srv),
             slice::from_ref(&self.globals.sampler),
             sprites.len() as u32,
+        )
+    }
+
+    /// Paint a batch of backdrop blurs: copy the frame painted so far, blur
+    /// the copy when the batch asks for a radius, and composite it back
+    /// through each blur's shape.
+    ///
+    /// The Metal renderer samples its target directly; a swap chain buffer
+    /// here cannot be a shader input, hence the copy. The other difference
+    /// is on purpose: with no radius Metal still goes through its half
+    /// resolution texture, which on a 2x display is one texel per point.
+    /// At 1x that would be a visible blur under a lens that asked for none,
+    /// so a batch without a radius reads the full resolution copy.
+    fn draw_backdrop_blurs(
+        &mut self,
+        blurs: &[BackdropBlur],
+        range: std::ops::Range<usize>,
+    ) -> Result<()> {
+        let batch = &blurs[range.clone()];
+        let radius = batch.first().map_or(0., |blur| blur.blur_radius);
+        let Some(region) = blur_region(batch, radius, self.width, self.height) else {
+            return Ok(());
+        };
+
+        if self.backdrop_scratch.is_none() {
+            let devices = self.devices.as_ref().context("devices missing")?;
+            self.backdrop_scratch = Some(
+                BackdropScratch::new(&devices.device, self.width, self.height)
+                    .context("creating the backdrop blur textures")?,
+            );
+        }
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let context = &devices.device_context;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let render_target = resources
+            .render_target
+            .as_ref()
+            .context("render target missing")?;
+        let scratch = self
+            .backdrop_scratch
+            .as_ref()
+            .context("backdrop blur textures missing")?;
+
+        // The frame so far, as far as this batch reads it.
+        unsafe {
+            let source = D3D11_BOX {
+                left: region.left,
+                top: region.top,
+                front: 0,
+                right: region.right,
+                bottom: region.bottom,
+                back: 1,
+            };
+            context.CopySubresourceRegion(
+                &scratch.copy,
+                0,
+                region.left,
+                region.top,
+                0,
+                render_target,
+                0,
+                Some(&source),
+            );
+        }
+
+        let mut backdrop = &scratch.copy_srv;
+        let offsets = kawase_offsets(radius * 0.5);
+        if !offsets.is_empty() {
+            let normalised = region.normalised(self.width, self.height);
+            unsafe { context.RSSetViewports(Some(slice::from_ref(&scratch.half_viewport))) };
+            // Down into half resolution, then back and forth there with a
+            // growing offset.
+            self.kawase_pass(
+                &self.pipelines.kawase_down_pipeline,
+                &scratch.copy_srv,
+                &scratch.half_rtv[0],
+                [1.0 / self.width as f32, 1.0 / self.height as f32],
+                1.0,
+                normalised,
+            )?;
+            let half_texel = [
+                1.0 / scratch.half_viewport.Width,
+                1.0 / scratch.half_viewport.Height,
+            ];
+            let mut read = 0usize;
+            for offset in offsets {
+                let write = 1 - read;
+                self.kawase_pass(
+                    &self.pipelines.kawase_up_pipeline,
+                    &scratch.half_srv[read],
+                    &scratch.half_rtv[write],
+                    half_texel,
+                    offset,
+                    normalised,
+                )?;
+                read = write;
+            }
+            backdrop = &scratch.half_srv[read];
+            unsafe {
+                context
+                    .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+                context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
+            }
+        }
+
+        self.pipelines
+            .backdrop_blur_pipeline
+            .draw_range_with_texture(
+                context,
+                slice::from_ref(backdrop),
+                self.globals
+                    .batch_params_buffer
+                    .as_ref()
+                    .context("batch params buffer missing")?,
+                slice::from_ref(&self.globals.clamp_sampler),
+                range.start as u32,
+                range.len() as u32,
+            )?;
+        // Leave no scratch texture bound as an input: the next batch may
+        // render into it.
+        unbind_texture(context);
+        Ok(())
+    }
+
+    /// One dual-Kawase pass from `source` into `target`, over `region`
+    /// (normalised: x, y, width, height). The caller has set the viewport
+    /// to the target's size.
+    fn kawase_pass(
+        &self,
+        pipeline: &PipelineState<KawaseInstance>,
+        source: &Option<ID3D11ShaderResourceView>,
+        target: &Option<ID3D11RenderTargetView>,
+        texel: [f32; 2],
+        offset: f32,
+        region: (f32, f32, f32, f32),
+    ) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let context = &devices.device_context;
+        let params = self
+            .globals
+            .kawase_params_buffer
+            .as_ref()
+            .context("kawase params buffer missing")?;
+        update_buffer(
+            context,
+            params,
+            &[KawaseParams {
+                texel,
+                offset,
+                _pad: 0.0,
+                origin: [region.0, region.1],
+                size: [region.2, region.3],
+            }],
+        )?;
+        unsafe {
+            // The target may be the input of the pass before.
+            unbind_texture(context);
+            context.OMSetRenderTargets(Some(slice::from_ref(target)), None);
+            context.VSSetConstantBuffers(
+                2,
+                Some(slice::from_ref(&self.globals.kawase_params_buffer)),
+            );
+            context.PSSetConstantBuffers(
+                2,
+                Some(slice::from_ref(&self.globals.kawase_params_buffer)),
+            );
+        }
+        pipeline.draw_with_texture(
+            context,
+            slice::from_ref(source),
+            slice::from_ref(&self.globals.clamp_sampler),
+            1,
         )
     }
 
@@ -1198,6 +1457,27 @@ impl DirectXRenderPipelines {
             4,
             create_blend_state(device)?,
         )?;
+        let kawase_down_pipeline = PipelineState::new(
+            device,
+            "kawase_down_pipeline",
+            ShaderModule::KawaseDown,
+            1,
+            create_blend_state_for_overwrite(device)?,
+        )?;
+        let kawase_up_pipeline = PipelineState::new(
+            device,
+            "kawase_up_pipeline",
+            ShaderModule::KawaseUp,
+            1,
+            create_blend_state_for_overwrite(device)?,
+        )?;
+        let backdrop_blur_pipeline = PipelineState::new(
+            device,
+            "backdrop_blur_pipeline",
+            ShaderModule::BackdropBlur,
+            4,
+            create_blend_state_for_backdrop_composite(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -1209,6 +1489,9 @@ impl DirectXRenderPipelines {
             subpixel_sprites,
             poly_sprites,
             surface_pipeline,
+            kawase_down_pipeline,
+            kawase_up_pipeline,
+            backdrop_blur_pipeline,
         })
     }
 }
@@ -1259,10 +1542,31 @@ impl DirectXGlobalElements {
             output
         };
 
+        let kawase_params_buffer = create_constant_buffer::<KawaseParams>(device)?;
+        let clamp_sampler = unsafe {
+            let desc = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_ALWAYS,
+                BorderColor: [0.0; 4],
+                MinLOD: 0.0,
+                MaxLOD: D3D11_FLOAT32_MAX,
+            };
+            let mut output = None;
+            device.CreateSamplerState(&desc, Some(&mut output))?;
+            output
+        };
+
         Ok(Self {
             global_params_buffer,
             batch_params_buffer,
+            kawase_params_buffer,
             sampler,
+            clamp_sampler,
         })
     }
 }
@@ -1772,6 +2076,231 @@ fn create_blend_state_for_path_sprite(device: &ID3D11Device) -> Result<ID3D11Ble
     }
 }
 
+/// The Kawase passes write every texel they shade: no blending.
+#[inline]
+fn create_blend_state_for_overwrite(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = false.into();
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+/// The backdrop composite: the fragment's first output *replaces* the target
+/// where the second output's alpha (the shape's coverage) is 1, and mixes
+/// with it only along the anti-aliased edge — dual-source blending,
+/// `out = src0 + dst * (1 - src1.a)`. Source-over would take the copy's own
+/// alpha for coverage; see `build_backdrop_composite_pipeline_state` in the
+/// Metal renderer for what that did.
+#[inline]
+fn create_blend_state_for_backdrop_composite(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = true.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC1_ALPHA;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC1_ALPHA;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+/// Take the texture off slot 0 of both stages, where
+/// `PipelineState::draw_with_texture` puts it.
+fn unbind_texture(device_context: &ID3D11DeviceContext) {
+    let none: [Option<ID3D11ShaderResourceView>; 1] = [None];
+    unsafe {
+        device_context.VSSetShaderResources(0, Some(&none));
+        device_context.PSSetShaderResources(0, Some(&none));
+    }
+}
+
+/// The part of the target a batch of backdrop blurs reads, in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlurRegion {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+impl BlurRegion {
+    /// As the Kawase passes take it: x, y, width, height in 0..1.
+    fn normalised(self, width: u32, height: u32) -> (f32, f32, f32, f32) {
+        let (width, height) = (width as f32, height as f32);
+        (
+            self.left as f32 / width,
+            self.top as f32 / height,
+            (self.right - self.left) as f32 / width,
+            (self.bottom - self.top) as f32 / height,
+        )
+    }
+}
+
+/// The union of the batch's bounds, grown by what the chain reads past
+/// them, inside the target. Copying and shading only this instead of the
+/// whole target is what keeps a small glass surface cheap (measured for the
+/// Metal renderer, whose `blur_region` this follows). `None` when nothing of
+/// it lies inside the target.
+fn blur_region(
+    blurs: &[BackdropBlur],
+    blur_radius: f32,
+    width: u32,
+    height: u32,
+) -> Option<BlurRegion> {
+    let (mut left, mut top) = (f32::MAX, f32::MAX);
+    let (mut right, mut bottom) = (f32::MIN, f32::MIN);
+    for blur in blurs {
+        let bounds = blur.bounds;
+        left = left.min(bounds.origin.x.0);
+        top = top.min(bounds.origin.y.0);
+        right = right.max(bounds.origin.x.0 + bounds.size.width.0);
+        bottom = bottom.max(bounds.origin.y.0 + bounds.size.height.0);
+    }
+    if !(left < right && top < bottom) {
+        return None;
+    }
+
+    let margin = blur_radius * 1.5 + 4.0;
+    let left = (left - margin).floor().max(0.0);
+    let top = (top - margin).floor().max(0.0);
+    let right = (right + margin).ceil().min(width as f32);
+    let bottom = (bottom + margin).ceil().min(height as f32);
+    if !(left < right && top < bottom) {
+        return None;
+    }
+    Some(BlurRegion {
+        left: left as u32,
+        top: top as u32,
+        right: right as u32,
+        bottom: bottom as u32,
+    })
+}
+
+/// The tap distances of the upsample passes for a radius given at half
+/// resolution; none under half a texel. As in the Metal renderer.
+fn kawase_offsets(radius_half_res: f32) -> Vec<f32> {
+    if radius_half_res.is_nan() || radius_half_res <= 0.5 {
+        return Vec::new();
+    }
+    let count = (radius_half_res.sqrt().round() as usize).clamp(1, 5);
+    // Offsets (i + 0.5) * scale sum to `radius_half_res`.
+    let scale = 2.0 * radius_half_res / (count * count) as f32;
+    (0..count).map(|i| (i as f32 + 0.5) * scale).collect()
+}
+
+#[cfg(test)]
+mod backdrop_tests {
+    // Not `super::*`: that brings in `gpui::test`, which is not the test
+    // attribute these want.
+    use super::{BlurRegion, KawaseParams, blur_region, kawase_offsets};
+    use gpui::{BackdropBlur, Bounds, ScaledPixels, point, size};
+
+    fn blur(x: f32, y: f32, width: f32, height: f32) -> BackdropBlur {
+        BackdropBlur {
+            bounds: Bounds {
+                origin: point(ScaledPixels(x), ScaledPixels(y)),
+                size: size(ScaledPixels(width), ScaledPixels(height)),
+            },
+            ..Default::default()
+        }
+    }
+
+    /// `BackdropBlur` in shaders.hlsl is read with this stride: two words,
+    /// four `float4`s, four words, and the three rows of the colour matrix.
+    #[test]
+    fn the_instance_is_as_long_as_the_shader_reads_it() {
+        assert_eq!(std::mem::size_of::<BackdropBlur>(), 136);
+        assert_eq!(std::mem::size_of::<KawaseParams>(), 32);
+    }
+
+    /// What is copied and shaded is the batch's union with a margin for the
+    /// taps, and never more than the target.
+    #[test]
+    fn the_region_is_the_batch_with_a_margin_inside_the_target() {
+        let batch = [blur(100., 50., 40., 20.), blur(200., 60., 10., 30.)];
+        assert_eq!(
+            blur_region(&batch, 0., 800, 600),
+            Some(BlurRegion {
+                left: 96,
+                top: 46,
+                right: 214,
+                bottom: 94,
+            })
+        );
+        // A radius reaches further.
+        assert_eq!(
+            blur_region(&batch, 8., 800, 600),
+            Some(BlurRegion {
+                left: 84,
+                top: 34,
+                right: 226,
+                bottom: 106,
+            })
+        );
+        // Cut at the target's edges.
+        assert_eq!(
+            blur_region(&[blur(-20., 590., 60., 60.)], 0., 800, 600),
+            Some(BlurRegion {
+                left: 0,
+                top: 586,
+                right: 44,
+                bottom: 600,
+            })
+        );
+    }
+
+    /// Nothing to read: an empty batch, an empty shape, one outside.
+    #[test]
+    fn a_batch_outside_the_target_has_no_region() {
+        assert_eq!(blur_region(&[], 0., 800, 600), None);
+        assert_eq!(blur_region(&[blur(10., 10., 0., 0.)], 0., 800, 600), None);
+        assert_eq!(blur_region(&[blur(900., 10., 20., 20.)], 0., 800, 600), None);
+    }
+
+    /// A region covering the whole target is the whole unit square.
+    #[test]
+    fn a_region_is_normalised_to_the_target() {
+        let region = BlurRegion {
+            left: 0,
+            top: 0,
+            right: 800,
+            bottom: 600,
+        };
+        assert_eq!(region.normalised(800, 600), (0., 0., 1., 1.));
+        let region = BlurRegion {
+            left: 200,
+            top: 150,
+            right: 600,
+            bottom: 300,
+        };
+        assert_eq!(region.normalised(800, 600), (0.25, 0.25, 0.5, 0.25));
+    }
+
+    /// No radius, no passes — the lens then reads the sharp copy. With one,
+    /// the tap distances add up to it.
+    #[test]
+    fn the_passes_add_up_to_the_radius() {
+        assert!(kawase_offsets(0.).is_empty());
+        assert!(kawase_offsets(0.5).is_empty());
+        assert!(kawase_offsets(f32::NAN).is_empty());
+        for radius in [1.0f32, 4.0, 12.0, 32.0] {
+            let offsets = kawase_offsets(radius);
+            assert!((1..=5).contains(&offsets.len()));
+            let sum: f32 = offsets.iter().sum();
+            assert!((sum - radius).abs() < 1e-3, "{radius}: {sum}");
+        }
+    }
+}
+
 #[inline]
 fn create_vertex_shader(device: &ID3D11Device, bytes: &[u8]) -> Result<ID3D11VertexShader> {
     unsafe {
@@ -1957,6 +2486,9 @@ pub(crate) mod shader_resources {
         SubpixelSprite,
         PolychromeSprite,
         Surface,
+        KawaseDown,
+        KawaseUp,
+        BackdropBlur,
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -2033,6 +2565,18 @@ pub(crate) mod shader_resources {
                 ShaderModule::Surface => match target {
                     ShaderTarget::Vertex => SURFACE_VERTEX_BYTES,
                     ShaderTarget::Fragment => SURFACE_FRAGMENT_BYTES,
+                },
+                ShaderModule::KawaseDown => match target {
+                    ShaderTarget::Vertex => KAWASE_DOWN_VERTEX_BYTES,
+                    ShaderTarget::Fragment => KAWASE_DOWN_FRAGMENT_BYTES,
+                },
+                ShaderModule::KawaseUp => match target {
+                    ShaderTarget::Vertex => KAWASE_UP_VERTEX_BYTES,
+                    ShaderTarget::Fragment => KAWASE_UP_FRAGMENT_BYTES,
+                },
+                ShaderModule::BackdropBlur => match target {
+                    ShaderTarget::Vertex => BACKDROP_BLUR_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_BLUR_FRAGMENT_BYTES,
                 },
             };
             Self { inner: bytes }
@@ -2115,6 +2659,9 @@ pub(crate) mod shader_resources {
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::Surface => "surface",
+                ShaderModule::KawaseDown => "kawase_down",
+                ShaderModule::KawaseUp => "kawase_up",
+                ShaderModule::BackdropBlur => "backdrop_blur",
             }
         }
     }
